@@ -20,6 +20,7 @@ const T = {
 };
 
 const PALETTES = [
+  { name: 'CuzBro', colors: ['#2f8cff', '#ff8a1f', '#ffffff'] },
   { name: 'Nebula', colors: ['#3fd0ff', '#c04dff', '#ff4fa3'] },
   { name: 'Solar',  colors: ['#ffb02e', '#ff5a1f', '#ffe9a8'] },
   { name: 'Aurora', colors: ['#3dffa2', '#1fc8d6', '#4a7dff'] },
@@ -622,7 +623,7 @@ const introEl = document.getElementById('intro'), statusEl = document.getElement
 const hudEl = document.getElementById('hud'), hintEl = document.getElementById('hint'), paletteEl = document.getElementById('palette');
 const chips = Object.fromEntries([...document.querySelectorAll('.chip')].map(c => [c.dataset.g, c]));
 function setStatus(msg, err = false) { statusEl.textContent = msg; statusEl.classList.toggle('err', err); }
-function enter() { introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
+function enter() { setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
 
 document.getElementById('startCam').addEventListener('click', async e => {
   e.currentTarget.disabled = true;

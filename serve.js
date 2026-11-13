@@ -2,7 +2,7 @@
 // (Camera access requires localhost or https; opening index.html as a file will not work.)
 const http = require('http'), fs = require('fs'), path = require('path');
 const PORT = process.env.PORT || 8080;
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml' };
 http.createServer((req, res) => {
   const rel = decodeURIComponent(req.url.split('?')[0]);
   const file = path.join(__dirname, rel === '/' ? 'index.html' : rel);

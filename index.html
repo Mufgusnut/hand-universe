@@ -3,29 +3,63 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hand Universe</title>
+<title>Hand Universe — CuzBro Observatory</title>
+<meta name="description" content="Control a universe of stars with your bare hands. A webcam experiment from CuzBro Observatory.">
+<meta property="og:title" content="Hand Universe — CuzBro Observatory">
+<meta property="og:description" content="Control a universe of stars with your bare hands.">
+<link rel="icon" type="image/png" href="favicon.png">
 <style>
-  :root { --ink: #e8ecff; --dim: #8a93b8; --glow: #7fd6ff; }
+  :root { --ink: #eef1ff; --dim: #8a93b8; --blue: #4aa8ff; --orange: #ff9426; --line: rgba(255,255,255,.12); }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #02030a; color: var(--ink); overflow: hidden;
     font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
   canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  a { color: inherit; }
 
-  #intro { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px;
-    background: radial-gradient(ellipse at center, rgba(2,3,10,.35), rgba(2,3,10,.9)); transition: opacity .8s; z-index: 5; }
+  /* brand mark, always present */
+  #brand { position: fixed; left: 22px; top: 16px; z-index: 6; display: block; line-height: 0; opacity: .92; transition: opacity .2s; }
+  #brand:hover { opacity: 1; }
+  #brand img { height: 54px; width: auto; mix-blend-mode: screen; }
+
+  #intro { position: fixed; inset: 0; z-index: 5; overflow-y: auto; display: grid; place-items: center; text-align: center;
+    padding: 84px 24px 28px; transition: opacity .8s;
+    background: radial-gradient(ellipse at center, rgba(2,3,10,.45), rgba(2,3,10,.92)); }
   #intro.hidden { opacity: 0; pointer-events: none; }
-  #intro h1 { font-weight: 200; font-size: clamp(34px, 7vw, 84px); letter-spacing: .28em; margin: 0 0 12px;
-    text-indent: .28em; text-shadow: 0 0 40px rgba(127,214,255,.55); }
-  #intro p { color: var(--dim); font-size: clamp(14px, 1.6vw, 18px); max-width: 560px; margin: 0 auto 34px; line-height: 1.6; }
+  .eyebrow { font-size: 12px; letter-spacing: .42em; text-indent: .42em; text-transform: uppercase; color: var(--orange); margin: 0 0 18px; }
+  #intro h1 { font-weight: 200; font-size: clamp(34px, 7vw, 84px); letter-spacing: .28em; text-indent: .28em; margin: 0 0 14px;
+    line-height: 1.05; text-shadow: 0 0 44px rgba(74,168,255,.5); }
+  .tagline { color: var(--dim); font-size: clamp(14px, 1.5vw, 17px); max-width: 540px; margin: 0 auto 30px; line-height: 1.65; }
   .btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-  button { font: inherit; font-size: 15px; letter-spacing: .12em; text-transform: uppercase; cursor: pointer;
-    padding: 14px 28px; border-radius: 999px; border: 1px solid rgba(127,214,255,.6); color: var(--ink);
-    background: rgba(127,214,255,.12); transition: all .25s; }
-  button:hover { background: rgba(127,214,255,.28); box-shadow: 0 0 34px rgba(127,214,255,.45); }
-  button.ghost { border-color: rgba(255,255,255,.2); background: transparent; color: var(--dim); }
-  button.ghost:hover { color: var(--ink); background: rgba(255,255,255,.08); box-shadow: none; }
-  #status { margin-top: 26px; min-height: 22px; color: var(--glow); font-size: 14px; letter-spacing: .06em; }
+  button { font: inherit; font-size: 14px; letter-spacing: .14em; text-transform: uppercase; cursor: pointer;
+    padding: 14px 30px; border-radius: 999px; border: 1px solid rgba(74,168,255,.65); color: var(--ink);
+    background: rgba(74,168,255,.14); transition: all .25s; }
+  button:hover { background: rgba(74,168,255,.3); box-shadow: 0 0 34px rgba(74,168,255,.45); }
+  button:disabled { opacity: .5; cursor: progress; }
+  button.ghost { border-color: var(--line); background: transparent; color: var(--dim); }
+  button.ghost:hover { color: var(--ink); background: rgba(255,255,255,.07); box-shadow: none; }
+  #status { margin-top: 16px; min-height: 20px; color: var(--blue); font-size: 13px; letter-spacing: .06em; }
   #status.err { color: #ff9a8a; }
+  .privacy { color: #5d668a; font-size: 12px; margin: 6px 0 0; letter-spacing: .03em; }
+
+  /* mission support crew */
+  .crew { margin-top: 34px; }
+  .crewLabel { display: flex; align-items: center; gap: 16px; justify-content: center; color: var(--dim);
+    font-size: 11px; letter-spacing: .38em; text-transform: uppercase; margin-bottom: 18px; }
+  .crewLabel::before, .crewLabel::after { content: ""; height: 1px; width: 64px; background: linear-gradient(90deg, transparent, var(--line)); }
+  .crewLabel::after { transform: scaleX(-1); }
+  .crewRow { display: flex; gap: clamp(14px, 3vw, 34px); justify-content: center; flex-wrap: wrap; list-style: none; margin: 0; padding: 0; }
+  .crewRow li { width: 96px; }
+  .crewRow a { text-decoration: none; display: block; }
+  .crewRow img { width: 68px; height: 68px; border-radius: 50%; object-fit: cover; display: block; margin: 0 auto 10px;
+    border: 1px solid rgba(255,255,255,.22); filter: saturate(.8) contrast(1.04);
+    box-shadow: 0 0 0 4px rgba(255,255,255,.03); transition: all .3s; }
+  .crewRow a:hover img { transform: scale(1.1); filter: none; border-color: var(--orange);
+    box-shadow: 0 0 0 4px rgba(255,148,38,.12), 0 0 28px rgba(255,148,38,.4); }
+  .crewRow b { display: block; font-weight: 500; font-size: 13px; letter-spacing: .14em; text-transform: uppercase; }
+  .crewRow span { display: block; margin-top: 4px; font-size: 10.5px; line-height: 1.35; color: var(--dim); letter-spacing: .03em; }
+  .credit { margin-top: 30px; font-size: 11.5px; letter-spacing: .08em; color: #5d668a; }
+  .credit a { color: var(--dim); text-decoration: none; border-bottom: 1px solid var(--line); }
+  .credit a:hover { color: var(--ink); }
 
   #hud { position: fixed; left: 0; right: 0; bottom: 18px; display: flex; flex-direction: column; align-items: center;
     gap: 10px; pointer-events: none; opacity: 0; transition: opacity 1s; z-index: 3; padding: 0 16px; }
@@ -34,16 +68,18 @@
   .chip { font-size: 12.5px; letter-spacing: .04em; color: var(--dim); padding: 7px 13px; border-radius: 999px;
     border: 1px solid rgba(255,255,255,.1); background: rgba(6,8,20,.55); backdrop-filter: blur(6px); transition: all .2s; }
   .chip b { color: var(--ink); font-weight: 600; margin-right: 6px; }
-  .chip.active { color: #fff; border-color: var(--glow); background: rgba(127,214,255,.22);
-    box-shadow: 0 0 22px rgba(127,214,255,.45); transform: translateY(-2px); }
+  .chip.active { color: #fff; border-color: var(--blue); background: rgba(74,168,255,.22);
+    box-shadow: 0 0 22px rgba(74,168,255,.45); transform: translateY(-2px); }
   #hint { font-size: 12px; color: var(--dim); letter-spacing: .05em; text-align: center; }
 
   #cam { position: fixed; right: 18px; top: 18px; width: 200px; border-radius: 12px; transform: scaleX(-1);
     opacity: 0; border: 1px solid rgba(255,255,255,.15); transition: opacity .6s; z-index: 2; pointer-events: none; }
   #cam.on { opacity: .55; }
-  #palette { position: fixed; left: 20px; top: 18px; font-size: 12px; letter-spacing: .3em; text-transform: uppercase;
+  #palette { position: fixed; left: 24px; top: 78px; font-size: 11px; letter-spacing: .3em; text-transform: uppercase;
     color: var(--dim); z-index: 3; opacity: 0; transition: opacity 1s; }
   #palette.on { opacity: 1; }
+
+  @media (max-height: 640px) { .crew { margin-top: 22px; } .credit { margin-top: 18px; } .tagline { margin-bottom: 20px; } }
 </style>
 <script type="importmap">
 { "imports": {
@@ -55,17 +91,33 @@
 <body>
 <canvas id="stage"></canvas>
 <video id="cam" playsinline muted></video>
+<a id="brand" href="https://cuzbro.net" aria-label="CuzBro Observatory home"><img src="cuzbro-logo.png" alt="CuzBro"></a>
 <div id="palette"></div>
 
 <div id="intro">
   <div>
+    <p class="eyebrow">CuzBro Observatory presents</p>
     <h1>HAND UNIVERSE</h1>
-    <p>Step back, raise your hands, and conjure. Your webcam video is processed entirely in this browser tab and never leaves your computer.</p>
+    <p class="tagline">We spend our nights photographing the sky. This is the one place you get to reach in and rearrange it. Step back, raise your hands, and take the stars for a spin.</p>
     <div class="btns">
       <button id="startCam">Enable camera</button>
       <button id="startMouse" class="ghost">Try with mouse</button>
     </div>
     <div id="status"></div>
+    <p class="privacy">Your camera feed is processed in this tab and never leaves your device.</p>
+
+    <section class="crew" aria-label="Mission support crew">
+      <div class="crewLabel">Mission Support</div>
+      <ul class="crewRow">
+        <li><a href="https://cuzbro.net/mission-support"><img src="crew/gus.jpg" alt="Gus, a Great Dane"><b>Gus</b><span>Heavy Equipment Inspector</span></a></li>
+        <li><a href="https://cuzbro.net/mission-support"><img src="crew/muffy.jpg" alt="Muffy, a fluffy grey cat"><b>Muffy</b><span>Senior Observatory Supervisor</span></a></li>
+        <li><a href="https://cuzbro.net/mission-support"><img src="crew/hazelnut.jpg" alt="Hazelnut, a tuxedo cat"><b>Hazelnut</b><span>Field Operations Specialist</span></a></li>
+        <li><a href="https://cuzbro.net/mission-support"><img src="crew/beau.jpg" alt="Beau, a tuxedo cat"><b>Beau</b><span>High-Altitude Explorer</span></a></li>
+        <li><a href="https://cuzbro.net/mission-support"><img src="crew/echo.jpg" alt="Echo, a miniature poodle"><b>Echo</b><span>Morale Officer</span></a></li>
+      </ul>
+    </section>
+
+    <p class="credit">Designed and built by <a href="https://cuzbro.net">CuzBro Observatory</a></p>
   </div>
 </div>
 
