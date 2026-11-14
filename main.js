@@ -879,8 +879,8 @@ async function startCamera() {
   video.classList.add('on');
   camBtn.hidden = false;
   hintEl.textContent = matchMedia('(pointer: coarse)').matches
-    ? 'Prop your device up and step back so the camera can see both hands'
-    : 'Stand back so the camera sees your hands · V toggles the camera preview · F for full screen';
+    ? 'Prop your device up and step back so the camera can see both hands · tap here to hide this guide'
+    : 'Stand back so the camera sees your hands · V camera preview · F full screen · H hides this guide';
 }
 
 function trackCamera(now, dt) {
@@ -929,7 +929,7 @@ const introEl = document.getElementById('intro'), statusEl = document.getElement
 const hudEl = document.getElementById('hud'), hintEl = document.getElementById('hint'), paletteEl = document.getElementById('palette');
 const chips = Object.fromEntries([...document.querySelectorAll('.chip')].map(c => [c.dataset.g, c]));
 function setStatus(msg, err = false) { statusEl.textContent = msg; statusEl.classList.toggle('err', err); }
-function enter() { keepAwake(); setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
+function enter() { keepAwake(); legendBtn.hidden = false; setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
 
 document.getElementById('startCam').addEventListener('click', async e => {
   e.currentTarget.disabled = true;
@@ -943,6 +943,21 @@ document.getElementById('startCam').addEventListener('click', async e => {
     e.currentTarget.disabled = false;
   }
 });
+// gesture guide: tap it (or the ? button, or H) to hide it, and the ? button or H to bring it back
+const legendBtn = document.getElementById('legendBtn');
+function setLegend(show) {
+  hudEl.classList.toggle('min', !show);
+  legendBtn.classList.toggle('off', !show);
+  legendBtn.title = show ? 'Hide gesture guide (H)' : 'Show gesture guide (H)';
+  try { localStorage.setItem('handiverse.legend', show ? '1' : '0'); } catch {}
+}
+const toggleLegend = () => setLegend(hudEl.classList.contains('min'));
+legendBtn.addEventListener('click', e => { toggleLegend(); e.currentTarget.blur(); });
+document.getElementById('legend').addEventListener('click', toggleLegend);
+hintEl.addEventListener('click', toggleLegend);
+window.addEventListener('keydown', e => { if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey && hudEl.classList.contains('on')) toggleLegend(); });
+try { if (localStorage.getItem('handiverse.legend') === '0') setLegend(false); } catch {}
+
 // camera preview: button in the corner, or the V key
 const camBtn = document.getElementById('camBtn');
 function toggleCam() {
