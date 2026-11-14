@@ -547,7 +547,7 @@ async function startCamera() {
   try { landmarker = await make('GPU'); } catch { landmarker = await make('CPU'); }
   mode = 'camera';
   video.classList.add('on');
-  hintEl.textContent = 'Stand back so the camera sees your hands · V toggles the camera preview';
+  hintEl.textContent = 'Stand back so the camera sees your hands · V toggles the camera preview · F for full screen';
 }
 
 function trackCamera(now, dt) {
@@ -598,6 +598,22 @@ document.getElementById('startCam').addEventListener('click', async e => {
   }
 });
 window.addEventListener('keydown', e => { if ((e.key === 'v' || e.key === 'V') && mode === 'camera') video.classList.toggle('on'); });
+
+// full screen: button in the corner, or the F key
+const fsBtn = document.getElementById('fs');
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(err => console.warn('Full screen was refused:', err));
+}
+if (document.fullscreenEnabled) {
+  fsBtn.addEventListener('click', e => { toggleFullscreen(); e.currentTarget.blur(); });
+  window.addEventListener('keydown', e => { if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) toggleFullscreen(); });
+  document.addEventListener('fullscreenchange', () => {
+    const on = !!document.fullscreenElement;
+    fsBtn.classList.toggle('on', on);
+    fsBtn.title = on ? 'Exit full screen (F or Esc)' : 'Full screen (F)';
+  });
+} else fsBtn.hidden = true;
 setPalette(0);
 
 // ---------------------------------------------------------------- main loop

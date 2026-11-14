@@ -77,6 +77,14 @@
     color: var(--dim); z-index: 3; opacity: 0; transition: opacity 1s; }
   #palette.on { opacity: 1; }
 
+  #fs { position: fixed; right: 18px; bottom: 18px; z-index: 6; width: 42px; height: 42px; padding: 0; display: grid; place-items: center;
+    border-radius: 50%; border: 1px solid var(--line); background: rgba(6,8,20,.55); color: var(--dim); backdrop-filter: blur(6px); }
+  #fs:hover { color: var(--ink); border-color: var(--blue); background: rgba(74,168,255,.18); box-shadow: 0 0 22px rgba(74,168,255,.35); }
+  #fs svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #fs .exit, #fs.on .enter { display: none; }
+  #fs.on .exit { display: block; }
+  #fs[hidden] { display: none; }
+
   @media (max-height: 640px) { .crew { margin-top: 22px; } .credit { margin-top: 18px; } .tagline { margin-bottom: 20px; } }
 </style>
 <script type="importmap">
@@ -91,6 +99,10 @@
 <video id="cam" playsinline muted></video>
 <a id="brand" href="https://cuzbro.net" aria-label="CuzBro Observatory home"><img src="cuzbro-logo.png" alt="CuzBro"></a>
 <div id="palette"></div>
+<button id="fs" type="button" aria-label="Toggle full screen" title="Full screen (F)">
+  <svg class="enter" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  <svg class="exit" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>
+</button>
 
 <div id="intro">
   <div>
@@ -130,6 +142,6 @@
   <div id="hint"></div>
 </div>
 
-<script type="module" src="./main.js?v=2"></script>
+<script type="module" src="./main.js?v=3"></script>
 </body>
 </html>
