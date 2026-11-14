@@ -492,7 +492,7 @@ function updatePortal(dt, active, a, b) {
   portal.visible = portalOpen > 0.01;
   if (active) {
     // sized to sit in the gap between the two palms rather than spill past them
-    const target = THREE.MathUtils.clamp(Math.hypot(a.x - b.x, a.y - b.y) / 2 - 1.0, 0.35, 2.4);
+    const target = THREE.MathUtils.clamp(Math.hypot(a.x - b.x, a.y - b.y) / 2 - 1.0, 0.35, 4.5);
     portalRadius += (target - portalRadius) * Math.min(1, dt * 8);
     portal.position.lerpVectors(a, b, 0.5); portal.position.z = -0.2;
     if (!portalWas) { portalAge = 0; portalPulse = 1; ring(portal.position, 220, 3.5, 0.2); } // it opens with a soft ripple
