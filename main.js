@@ -29,7 +29,7 @@ const T = {
   galaxyMax: 3.2,      // radius it reaches if the pinch is held the full time
   galaxyGrowTime: 6,   // seconds of holding to go from min to max
   tiltDepth: 2.5,      // how strongly tipping the hand toward/away from the camera tilts a held galaxy
-  portalDelay: 2.8,    // seconds after a supernova before two open hands may open a portal
+  portalDelay: 2.2,    // seconds after a supernova before two open hands may open a portal
   nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
@@ -165,6 +165,7 @@ const AMB = 9000;
 const aPos = new Float32Array(AMB * 3), aVel = new Float32Array(AMB * 3), aHome = new Float32Array(AMB * 3);
 const aSeed = new Float32Array(AMB * 3), aCol = new Float32Array(AMB * 3);
 const aSize = new Float32Array(AMB), aFade = new Float32Array(AMB), aHeat = new Float32Array(AMB);
+const blasts = []; // supernovae still pushing their stars outward: {x, y, z, sp, t}
 for (let i = 0; i < AMB; i++) {
   const j = i * 3, warm = Math.random(), k = 0.22 + Math.random() * 0.45;
   aSeed[j] = Math.random() * 2 - 1; aSeed[j + 1] = Math.random() * 2 - 1; aSeed[j + 2] = -9 + Math.random() * 10.5;
@@ -196,13 +197,32 @@ function updateAmbient(dt) {
   let strong = false;
   for (let w = 0; w < nw; w++) if (wells[w].strong) strong = true;
   const k = strong ? 0.08 : 1.2; // homing spring relaxes while something is gathering
+  for (let b = blasts.length - 1; b >= 0; b--) if ((blasts[b].t += dt) > 1.5) blasts.splice(b, 1);
+  const nb = blasts.length;
+  // With two fists up, each star answers only to the fist nearer its home, so the sky is shared
+  // between them instead of whichever closed first keeping everything.
+  let nf = 0;
+  for (let w = 0; w < nw; w++) if (wells[w].fist) nf++;
   for (let i = 0; i < AMB; i++) {
     const j = i * 3, x = aPos[j], y = aPos[j + 1], z = aPos[j + 2];
-    const heat = aHeat[i], kh = heat > 0 ? k * Math.max(0, 1 - heat * 1.5) : k;
-    if (heat > 0) aHeat[i] = Math.max(0, heat - dt * 0.45);
+    // heat 2..1: riding the blast outward; 1..0: being drawn smoothly back home
+    const heat = aHeat[i], out = heat > 1 ? heat - 1 : 0, back = heat > 1 ? 0 : heat, bump = 4 * back * (1 - back);
+    const kh = out > 0 ? k * Math.max(0, 1 - out * 3) : k * (1 + 4 * bump);
+    if (heat > 0) aHeat[i] = Math.max(0, heat - dt * 1.1);
+    let own = -1;
+    if (nf > 1) {
+      let bd = Infinity;
+      for (let w = 0; w < nw; w++) {
+        const W = wells[w];
+        if (!W.fist) continue;
+        const hx = W.x - aHome[j], hy = W.y - aHome[j + 1], hd = hx * hx + hy * hy;
+        if (hd < bd) { bd = hd; own = w; }
+      }
+    }
     let ax = (aHome[j] - x) * kh, ay = (aHome[j + 1] - y) * kh, az = (aHome[j + 2] - z) * kh;
     for (let w = 0; w < nw; w++) {
       const W = wells[w], dx = W.x - x, dy = W.y - y, dz = W.z - z;
+      if (own >= 0 && W.fist && w !== own) continue;
       if (W.g < 0) { // repel (open hand): stars part around it
         const d2 = dx * dx + dy * dy + dz * dz + 0.3, a = W.g / (d2 * Math.sqrt(d2));
         ax += dx * a; ay += dy * a; az += dz * a;
@@ -214,10 +234,16 @@ function updateAmbient(dt) {
       const m = Math.max(W.g * (d - W.r0) / ((d + 0.5) * d), -W.g * 0.5), s = W.swirl / (d + 0.6);
       ax += (dx * m - dy * s) / d; ay += (dy * m + dx * s) / d; az += dz * (W.flat ?? 1.5);
     }
-    const vx = (aVel[j] + ax * dt) * drag, vy = (aVel[j + 1] + ay * dt) * drag, vz = (aVel[j + 2] + az * dt) * drag;
+    if (out > 0) for (let b = 0; b < nb; b++) { // a steady shove rather than a single kick
+      const B = blasts[b], dx = x - B.x, dy = y - B.y, dz = z - B.z, d = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.2;
+      const a = B.sp * 3.4 * out / (1 + d * 0.25) / d;
+      ax += dx * a; ay += dy * a; az += dz * a * 0.5;
+    }
+    const dg = bump > 0 ? drag * Math.max(0, 1 - 2.5 * bump * dt) : drag;
+    const vx = (aVel[j] + ax * dt) * dg, vy = (aVel[j + 1] + ay * dt) * dg, vz = (aVel[j + 2] + az * dt) * dg;
     aVel[j] = vx; aVel[j + 1] = vy; aVel[j + 2] = vz;
     aPos[j] = x + vx * dt; aPos[j + 1] = y + vy * dt; aPos[j + 2] = z + vz * dt;
-    aFade[i] = Math.min(2, 0.55 + Math.sqrt(vx * vx + vy * vy + vz * vz) * 0.12) + heat * 0.45; // moving stars glow
+    aFade[i] = Math.min(2, 0.55 + Math.sqrt(vx * vx + vy * vy + vz * vz) * 0.12) + out * 0.5 + back * 0.15; // moving stars glow
   }
   aGeo.attributes.position.needsUpdate = true;
   aGeo.attributes.aFade.needsUpdate = true;
@@ -226,6 +252,7 @@ function updateAmbient(dt) {
 // ---------------------------------------------------------------- effects
 function burst(p, power, vel) {
   const sp = 6 + 15 * power, gathered = 1.6 + 1.6 * power;
+  blasts.push({ x: p.x, y: p.y, z: p.z, sp, t: 0 });
   for (let i = 0; i < AMB; i++) {
     const j = i * 3, dx = aPos[j] - p.x, dy = aPos[j + 1] - p.y, dz = aPos[j + 2] - p.z;
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -236,8 +263,8 @@ function burst(p, power, vel) {
       let ux = dx * inv + q * Math.cos(a) * 0.45, uy = dy * inv + q * Math.sin(a) * 0.45, uz = dz * inv * 0.5 + z * 0.35;
       const n = 1 / (Math.hypot(ux, uy, uz) + 1e-3), v = sp * (0.3 + 0.7 * Math.cbrt(Math.random()));
       ux *= n * v; uy *= n * v; uz *= n * v;
-      aVel[j] = ux + vel.x * 0.3; aVel[j + 1] = uy + vel.y * 0.3; aVel[j + 2] = uz * 0.6;
-      aHeat[i] = 0.7 + Math.random() * 0.5;
+      aVel[j] = ux * 0.22 + vel.x * 0.3; aVel[j + 1] = uy * 0.22 + vel.y * 0.3; aVel[j + 2] = uz * 0.13;
+      aHeat[i] = 1.8 + Math.random() * 0.35;
       pickColor(Math.random() < 0.2 ? 0.7 : 0.1);
       const t = 0.55 + Math.random() * 0.4;
       spawn(aPos[j], aPos[j + 1], aPos[j + 2], ux * t + vel.x * 0.3, uy * t + vel.y * 0.3, uz * 0.6 * t,
@@ -245,7 +272,8 @@ function burst(p, power, vel) {
       continue;
     }
     const k = sp * (0.6 + Math.random() * 0.8) / (d + 0.4) / (d + 0.05); // the rest are shoved by the blast
-    aVel[j] += dx * k; aVel[j + 1] += dy * k; aVel[j + 2] += dz * k * 0.5;
+    aVel[j] += dx * k * 0.6; aVel[j + 1] += dy * k * 0.6; aVel[j + 2] += dz * k * 0.3;
+    if (aHeat[i] < 1) aHeat[i] = 1;
   }
   // shove whatever is already nearby (this is what makes a charged fist a supernova)
   for (let i = 0; i < MAX; i++) {
