@@ -23,6 +23,8 @@ const T = {
   grabFling: 1.2,      // a released galaxy only drifts if the hand was moving faster than this
   fistDelay: 0.45,     // seconds after any point/pinch/peace during which a fist is ignored
   fistHoldFrames: 4,   // a fist must persist this many frames before it starts gathering
+  minCharge: 0.1,      // how much a fist must have gathered (0-1) before opening it makes a supernova
+  openWindow: 0.5,     // seconds a gathered charge is kept while the fist turns into an open hand
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -605,13 +607,14 @@ class Hand {
   act(now, dt, portalActive) {
     const g = this.gesture, p = this.pos;
     if (g !== 'pinch') this.release();
-    if (g !== 'fist') this.charge = Math.max(0, this.charge - dt * 1.6);
+    // the gathered charge survives the split second it takes a fist to become an open hand, then drains
+    if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
 
     if (g === 'open') {
-      if (this.lastSolid !== 'open' && now - this.lastBurst > 0.5) {
-        if (!portalActive || this.charge > 0.3) burst(p, Math.max(0.12, this.charge), this.vel);
-        this.lastBurst = now; this.charge = 0;
-      }
+      // An open hand on its own never explodes. The supernova only fires when a fist that has
+      // actually been gathering is opened.
+      if (this.charge >= T.minCharge) { burst(p, this.charge, this.vel); this.lastBurst = now; }
+      this.charge = 0;
       if (!portalActive) wells.push({ x: p.x, y: p.y, z: p.z, g: -7 });
       if (!portalActive) { // streamers off every fingertip
         for (const t of this.tips) for (let k = 0; k < 5; k++) {
@@ -622,7 +625,7 @@ class Hand {
         }
       }
     } else if (g === 'fist') {
-      this.charge = Math.min(1, this.charge + dt / 2.2);
+      this.charge = Math.min(1, this.charge + dt / 2.2); this.fistAt = now;
       // pulls the background stars (and any loose sparks) into a spinning disc around the fist
       wells.push({ x: p.x, y: p.y, z: p.z, g: 30 + 40 * this.charge, r0: 0.45 + 0.5 * this.charge, swirl: 12, strong: true, fist: true });
       pickColor(0.8); // hot core
