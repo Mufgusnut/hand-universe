@@ -18,6 +18,8 @@ const T = {
   pinchOff: 0.5,     // ...and to release it
   pointStraight: 0.88, // index finger straightness needed to count as pointing
   pointLead: 0.15,     // ...and how much straighter it must be than the other three fingers
+  pinchIndexOpen: 0.6, // index straightness above which thumb-on-index is a pinch, not a fist
+  grabRadius: 2.2,     // how near (world units) a pinch must be to pick up an existing galaxy
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -247,142 +249,254 @@ function ring(p, n, speed, whiten) {
   }
 }
 
-// --- galaxies (GPU-animated spiral, one draw call each)
-const GALAXY_N = 5000;
-const galaxyGeo = (() => {
-  const data = new Float32Array(GALAXY_N * 4);
-  const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
-  for (let i = 0; i < GALAXY_N; i++) {
-    let r, ang, h;
-    if (Math.random() < 0.18) { r = Math.random() * 0.2; ang = Math.random() * 6.283; h = gauss() * 0.07; }
-    else {
-      r = 0.05 + Math.pow(Math.random(), 1.5) * 0.95;
-      ang = ((i % 3) / 3) * 6.283 + r * 4.5 + gauss() * 0.45 * (1 - r * 0.5);
-      h = gauss() * 0.035;
+// --- galaxies (GPU-animated, one draw call each; every galaxy is generated with its own shape and size)
+const GALAXY_N = 5000, GALAXY_LIFE = 45;
+const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
+const rand = (a, b) => a + Math.random() * (b - a);
+const TAU = Math.PI * 2;
+
+function shapeGalaxy(g) {
+  const data = g.data, u = g.mat.uniforms;
+  const kind = ['spiral', 'spiral', 'spiral', 'barred', 'barred', 'ring', 'elliptical', 'irregular'][(Math.random() * 8) | 0];
+  const put = (i, r, ang, h) => { const j = i * 4; data[j] = r; data[j + 1] = ang; data[j + 2] = h; data[j + 3] = Math.random(); };
+  let rigid = 0.35, diff = 0.25, squash = 1, maxScale = rand(0.9, 3.2);
+
+  if (kind === 'spiral') {
+    const arms = 2 + ((Math.random() * 4) | 0), twist = rand(2.5, 7), spread = rand(0.2, 0.55);
+    const bulge = rand(0.08, 0.25), bulgeR = rand(0.12, 0.25);
+    for (let i = 0; i < GALAXY_N; i++) {
+      if (Math.random() < bulge) { put(i, Math.random() * bulgeR, rand(0, TAU), gauss() * 0.07); continue; }
+      const r = 0.05 + Math.pow(Math.random(), 1.5) * 0.95;
+      put(i, r, ((i % arms) / arms) * TAU + r * twist + gauss() * spread * (1 - r * 0.5), gauss() * 0.035);
     }
-    data.set([r, ang, h, Math.random()], i * 4);
+  } else if (kind === 'barred') {
+    const bar = rand(0.25, 0.45), twist = rand(3, 6);
+    rigid = 0.5; diff = 0.04; // turns almost rigidly so the bar holds together
+    for (let i = 0; i < GALAXY_N; i++) {
+      const v = Math.random(), side = (i % 2) * Math.PI;
+      if (v < 0.12) put(i, Math.random() * 0.12, rand(0, TAU), gauss() * 0.06);
+      else if (v < 0.42) { const r = Math.random() * bar, w = gauss() * 0.05; put(i, Math.hypot(r, w), side + Math.atan2(w, r), gauss() * 0.03); }
+      else { const r = bar + Math.pow(Math.random(), 1.3) * (1 - bar); put(i, r, side + (r - bar) * twist + gauss() * 0.28, gauss() * 0.03); }
+    }
+  } else if (kind === 'ring') {
+    const ringR = rand(0.6, 0.85), width = rand(0.04, 0.09);
+    for (let i = 0; i < GALAXY_N; i++) {
+      const v = Math.random();
+      if (v < 0.2) put(i, Math.random() * 0.15, rand(0, TAU), gauss() * 0.06);
+      else if (v < 0.82) put(i, ringR + gauss() * width, rand(0, TAU), gauss() * 0.03);
+      else put(i, Math.random() * ringR, rand(0, TAU), gauss() * 0.03);
+    }
+  } else if (kind === 'elliptical') {
+    rigid = 0.18; diff = 0.1; squash = rand(0.5, 0.9); maxScale = rand(0.8, 2.3);
+    for (let i = 0; i < GALAXY_N; i++) { const r = Math.pow(Math.random(), 2.2); put(i, r, rand(0, TAU), gauss() * 0.3 * (1 - r * 0.7)); }
+  } else { // irregular: a handful of ragged clumps
+    rigid = 0.28; diff = 0.05; squash = rand(0.7, 1); maxScale = rand(0.8, 2.3);
+    const clumps = Array.from({ length: 3 + ((Math.random() * 4) | 0) }, () => ({ r: rand(0.1, 0.7), a: rand(0, TAU), s: rand(0.08, 0.25) }));
+    for (let i = 0; i < GALAXY_N; i++) {
+      if (Math.random() < 0.3) { put(i, Math.pow(Math.random(), 1.5) * 0.9, rand(0, TAU), gauss() * 0.08); continue; }
+      const c = clumps[(Math.random() * clumps.length) | 0];
+      const x = c.r * Math.cos(c.a) + gauss() * c.s, z = c.r * Math.sin(c.a) + gauss() * c.s;
+      put(i, Math.hypot(x, z), Math.atan2(z, x), gauss() * 0.08);
+    }
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(GALAXY_N * 3), 3));
-  g.setAttribute('aData', new THREE.BufferAttribute(data, 4));
-  return g;
-})();
+  g.geo.attributes.aData.needsUpdate = true;
+
+  const spin = (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.5);
+  u.uRigid.value = rigid * spin; u.uDiff.value = diff * spin; u.uSquash.value = squash;
+  g.maxScale = maxScale; g.growTime = rand(1.0, 2.4);
+  g.points.rotation.set(rand(0.35, 1.35), 0, rand(-0.9, 0.9)); // from nearly edge-on to nearly face-on
+  if (kind === 'elliptical') { u.uA.value.setRGB(1, 0.72, 0.42); u.uB.value.setRGB(1, 0.9, 0.7); }
+  else {
+    const a = (Math.random() * palette.length) | 0, b = (a + 1 + ((Math.random() * (palette.length - 1)) | 0)) % palette.length;
+    u.uA.value.copy(palette[a]); u.uB.value.copy(palette[b]);
+  }
+  u.uCore.value.setRGB(1, rand(0.82, 0.97), rand(0.6, 0.95));
+}
 
 function makeGalaxy() {
+  const data = new Float32Array(GALAXY_N * 4);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(GALAXY_N * 3), 3));
+  geo.setAttribute('aData', new THREE.BufferAttribute(data, 4).setUsage(THREE.DynamicDrawUsage));
   const mat = new THREE.ShaderMaterial({
     uniforms: { uPx, uTime: { value: 0 }, uAlpha: { value: 0 }, uSize: { value: 1 },
-      uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() } },
+      uRigid: { value: 0.35 }, uDiff: { value: 0.25 }, uSquash: { value: 1 },
+      uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() }, uCore: { value: new THREE.Color() } },
     vertexShader: /* glsl */`
       attribute vec4 aData;
-      uniform float uPx, uTime, uAlpha, uSize; uniform vec3 uA, uB;
+      uniform float uPx, uTime, uAlpha, uSize, uRigid, uDiff, uSquash; uniform vec3 uA, uB, uCore;
       varying vec3 vColor;
       void main() {
         float r = aData.x;
-        float ang = aData.y + uTime * (0.35 + 0.25 / (0.3 + r));
-        vec3 p = vec3(cos(ang) * r, aData.z, sin(ang) * r);
+        float ang = aData.y + uTime * (uRigid + uDiff / (0.3 + r));
+        vec3 p = vec3(cos(ang) * r, aData.z, sin(ang) * r * uSquash);
         vec4 mv = modelViewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mv;
         gl_PointSize = (0.025 + 0.05 * aData.w) * uSize * uPx / max(0.1, -mv.z);
         vec3 arm = mix(uA, uB, aData.w);
-        vColor = mix(vec3(1.0, 0.92, 0.75), arm, smoothstep(0.05, 0.45, r)) * uAlpha * (0.2 + 0.35 * aData.w);
+        vColor = mix(uCore, arm, smoothstep(0.05, 0.45, r)) * uAlpha * (0.12 + 0.24 * aData.w);
       }`,
     fragmentShader: SPRITE_FRAG,
     blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, transparent: true,
   });
-  const points = new THREE.Points(galaxyGeo, mat);
-  points.frustumCulled = false; points.visible = false;
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false; points.visible = false; points.renderOrder = 2;
   scene.add(points);
-  return { points, mat, alive: false, held: false, age: 0, grow: 0, vel: new THREE.Vector3() };
+  return { points, mat, geo, data, alive: false, held: false, growing: false, age: 0, grow: 0, swallow: 0,
+    maxScale: 2, growTime: 1.6, radius: 0.25, vel: new THREE.Vector3() };
 }
-const galaxies = Array.from({ length: 5 }, makeGalaxy);
+const galaxies = Array.from({ length: 6 }, makeGalaxy);
 
 function acquireGalaxy(p) {
   let g = galaxies.find(x => !x.alive);
   if (!g) g = galaxies.filter(x => !x.held).sort((a, b) => b.age - a.age)[0];
   if (!g) return null;
-  g.alive = true; g.held = true; g.age = 0; g.grow = 0; g.vel.set(0, 0, 0);
+  shapeGalaxy(g);
+  g.alive = true; g.held = true; g.growing = true; g.age = 0; g.grow = 0; g.swallow = 0; g.vel.set(0, 0, 0);
   g.points.visible = true; g.points.position.copy(p);
-  g.points.rotation.set(0.7 + Math.random() * 0.5, 0, (Math.random() - 0.5) * 1.0);
-  g.mat.uniforms.uA.value.copy(palette[0]); g.mat.uniforms.uB.value.copy(palette[1 + ((Math.random() * 2) | 0)]);
   return g;
 }
 
-const GALAXY_LIFE = 16;
+// Pinching on or near an existing galaxy picks it up instead of making a new one. The target is generous.
+function grabGalaxy(p) {
+  let best = null, bestD = Infinity;
+  for (const g of galaxies) {
+    if (!g.alive || g.held || g.swallow > 0) continue;
+    const d = Math.hypot(g.points.position.x - p.x, g.points.position.y - p.y);
+    if (d < Math.max(T.grabRadius, g.radius + 0.8) && d < bestD) { best = g; bestD = d; }
+  }
+  if (best) { best.held = true; best.growing = false; best.age = 0; best.vel.set(0, 0, 0); }
+  return best;
+}
+
+function killGalaxy(g) { g.alive = false; g.held = false; g.swallow = 0; g.points.visible = false; }
+
 function updateGalaxies(dt) {
   for (const g of galaxies) {
     if (!g.alive) continue;
     g.age += dt;
-    if (g.held) { g.grow += dt; g.age = 0; }
+    if (g.held) { g.age = 0; if (g.growing) g.grow += dt; }
     else {
       g.points.position.addScaledVector(g.vel, dt);
       g.vel.multiplyScalar(Math.exp(-0.6 * dt));
-      if (g.age > GALAXY_LIFE) { g.alive = false; g.points.visible = false; continue; }
+      if (g.age > GALAXY_LIFE) { killGalaxy(g); continue; }
     }
-    const scale = 0.25 + 2.3 * (1 - Math.exp(-g.grow / 1.6));
+    g.radius = 0.25 + (g.maxScale - 0.25) * (1 - Math.exp(-g.grow / g.growTime));
+    const scale = g.radius * Math.max(0.02, 1 - g.swallow);
     g.points.scale.setScalar(scale);
-    g.mat.uniforms.uSize.value = 0.6 + scale * 0.5;
-    g.mat.uniforms.uTime.value += dt * (g.held ? 2.2 : 1);
+    g.mat.uniforms.uSize.value = 0.2 + scale * 0.62;
+    g.mat.uniforms.uTime.value += dt * (g.held && g.growing ? 2.2 : 1) * (1 + g.swallow * 7);
     const fadeIn = Math.min(1, g.grow * 3), fadeOut = g.held ? 1 : Math.min(1, (GALAXY_LIFE - g.age) / 3);
-    g.mat.uniforms.uAlpha.value = fadeIn * fadeOut;
+    const density = Math.min(1, 0.1 + 0.26 * scale * scale); // same star count in less area would burn out
+    g.mat.uniforms.uAlpha.value = fadeIn * fadeOut * density * (g.held && !g.growing ? 1.3 : 1);
   }
 }
 
-// --- portal
+// --- portal: an opaque window into somewhere else, ringed with energy
+ambient.renderOrder = 0; particles.renderOrder = 2;
 const portalMat = new THREE.ShaderMaterial({
-  uniforms: { uTime: { value: 0 }, uOpen: { value: 0 },
+  uniforms: { uTime: { value: 0 }, uOpen: { value: 0 }, uPulse: { value: 0 },
     uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() }, uC: { value: new THREE.Color() } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: /* glsl */`
-    varying vec2 vUv; uniform float uTime, uOpen; uniform vec3 uA, uB, uC;
+    varying vec2 vUv; uniform float uTime, uOpen, uPulse; uniform vec3 uA, uB, uC;
+    float hash1(float n){ return fract(sin(n) * 43758.5453); }
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
       return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
     float fbm(vec2 p){ float v = 0.0, a = 0.5; for(int i=0;i<5;i++){ v += a*noise(p); p = p*2.03 + 17.0; a *= 0.5; } return v; }
     void main(){
-      vec2 p = (vUv - 0.5) * 2.8;           // rim sits at r = 1
+      vec2 p = (vUv - 0.5) * 3.4;            // rim sits at r = 1
       float r = length(p), a = atan(p.y, p.x);
-      float sw = a + uTime * 0.9 + 2.2 * log(r + 0.08);
-      float depth = 1.1 / (r + 0.22) + uTime * 0.8;
-      float n = fbm(vec2(cos(sw), sin(sw)) * 1.7 + depth * vec2(0.8, 0.6));
-      float inside = smoothstep(1.0, 0.86, r);
-      vec3 tunnel = mix(uC, uA, smoothstep(0.0, 0.9, r)) * pow(n, 1.8) * 1.5 * inside;
-      tunnel += vec3(1.0, 0.95, 0.9) * 0.004 / (r * r + 0.01) * inside;
-      float flick = 0.55 + 0.9 * fbm(vec2(cos(a + uTime * 1.7), sin(a + uTime * 1.7)) * 3.0 + uTime * 0.5);
-      float rim = exp(-pow((r - 1.0) / 0.055, 2.0)) * flick;
-      float wisps = exp(-max(r - 1.0, 0.0) * 5.0) * step(1.0, r) * n * 0.9;
-      vec3 col = tunnel + uB * rim * 1.5 + uA * wisps * 0.6;
-      gl_FragColor = vec4(col * uOpen, 1.0);
+      float inside = smoothstep(1.0, 0.965, r);
+
+      // faint nebula swirling down the throat
+      float sw = a + uTime * 0.6 + 2.6 * log(r + 0.06);
+      float n = fbm(vec2(cos(sw), sin(sw)) * 1.6 + (0.9 / (r + 0.2) + uTime * 0.5) * vec2(0.8, 0.6));
+      vec3 col = mix(uC, uA, smoothstep(0.1, 1.0, r)) * pow(n, 2.4) * 0.5;
+
+      // stars streaking out of the centre at warp speed
+      float an = a / 6.2831853 + 0.5;
+      for (int i = 0; i < 3; i++) {
+        float fi = float(i), cells = 36.0 + 22.0 * fi;
+        float c = an * cells;
+        float id = mod(floor(c), cells), f = fract(c) - 0.5;
+        float rnd = hash1(id * 17.3 + fi * 91.7), rnd2 = hash1(id * 5.1 + fi * 13.3);
+        float s = fract(rnd + uTime * (0.18 + 0.3 * rnd2));
+        float rs = s * s * 1.05, len = 0.02 + 0.28 * s;
+        float along = smoothstep(rs - len, rs, r) * smoothstep(rs + 0.015, rs, r);
+        float across = smoothstep(0.5, 0.0, abs(f) * (1.0 + 6.0 * (1.0 - rnd2)));
+        col += mix(vec3(1.0), mix(uA, uB, rnd), 0.55) * along * across * across * (0.4 + 1.2 * s);
+      }
+      col += vec3(1.0, 0.96, 0.9) * 0.0025 / (r * r + 0.006);
+      col *= inside;
+
+      // the rim: a hot white line inside a two-colour glow, with arcs licking outward
+      float flick = 0.7 + 0.8 * fbm(vec2(cos(a + uTime * 1.3), sin(a + uTime * 1.3)) * 3.0 + uTime * 0.6);
+      vec3 rimCol = mix(uA, uB, 0.5 + 0.5 * sin(a * 2.0 - uTime * 2.2));
+      float line = exp(-pow((r - 1.0) / 0.022, 2.0)), glow = exp(-pow((r - 1.0) / 0.09, 2.0));
+      col += (rimCol * glow * 0.55 * flick + mix(rimCol, vec3(1.0), 0.6) * line * 0.6) * (1.0 + 1.5 * uPulse);
+      float arcs = pow(fbm(vec2(cos(a) * 4.0 + uTime * 0.8, sin(a) * 4.0 - uTime * 0.5) + r * 3.0), 3.0);
+      col += rimCol * arcs * exp(-max(r - 1.0, 0.0) * 4.5) * step(1.0, r) * 1.4;
+
+      // premultiplied: the disc hides the stars behind it, everything else adds light
+      gl_FragColor = vec4(col * uOpen, inside * 0.94 * uOpen);
     }`,
-  blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, transparent: true,
+  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+  depthWrite: false, depthTest: false, transparent: true,
 });
-const portal = new THREE.Mesh(new THREE.PlaneGeometry(2.8, 2.8), portalMat);
-portal.visible = false;
+const portal = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 3.4), portalMat);
+portal.visible = false; portal.renderOrder = 1;
 scene.add(portal);
-let portalOpen = 0, portalRadius = 1;
+let portalOpen = 0, portalRadius = 1, portalAge = 0, portalPulse = 0, portalWas = false;
 
 function updatePortal(dt, active, a, b) {
   portalOpen += ((active ? 1 : 0) - portalOpen) * Math.min(1, dt * (active ? 5 : 3.5));
+  portalPulse = Math.max(0, portalPulse - dt * 1.8);
   portal.visible = portalOpen > 0.01;
   if (active) {
-    const target = Math.max(0.7, a.distanceTo(b) / 2);
+    const target = Math.max(1.0, a.distanceTo(b) / 2);
     portalRadius += (target - portalRadius) * Math.min(1, dt * 8);
     portal.position.lerpVectors(a, b, 0.5); portal.position.z = -0.2;
+    if (!portalWas) { portalAge = 0; portalPulse = 1; ring(portal.position, 900, 8, 0.4); } // it tears open
+    portalAge += dt;
     // background stars get drawn onto the rim and race around it
-    wells.push({ x: portal.position.x, y: portal.position.y, z: 0, g: 16, r0: portalRadius * 1.05, swirl: 12, strong: true });
-    // sparks racing around the rim
-    for (let i = 0; i < 26; i++) {
-      const ang = Math.random() * Math.PI * 2, c = Math.cos(ang), s = Math.sin(ang), v = 3 + Math.random() * 3;
+    wells.push({ x: portal.position.x, y: portal.position.y, z: 0, g: 7, r0: portalRadius * 1.25, swirl: 9, range: portalRadius * 3 + 2 });
+    for (let i = 0; i < 22; i++) {
+      const ang = Math.random() * TAU, c = Math.cos(ang), s = Math.sin(ang), v = 3 + Math.random() * 3;
       pickColor(0.3);
       spawn(portal.position.x + c * portalRadius, portal.position.y + s * portalRadius, 0,
         -s * v + c * (Math.random() - 0.3) * 2, c * v + s * (Math.random() - 0.3) * 2, (Math.random() - 0.5),
         cr, cg, cb, 0.5 + Math.random() * 0.9, 0.04 + Math.random() * 0.05);
     }
   }
+  portalWas = active;
+
+  // Galaxies fall in: at once if they are close, and from further and further away the longer it stays open.
+  const reach = portalRadius * 1.3 + 0.6 + portalAge * 0.55;
+  for (const g of galaxies) {
+    if (!g.alive || g.held) continue;
+    if (!active) { g.swallow = Math.max(0, g.swallow - dt * 2); continue; } // it closed in time: the galaxy recovers
+    const dx = portal.position.x - g.points.position.x, dy = portal.position.y - g.points.position.y;
+    const d = Math.hypot(dx, dy) + 1e-3;
+    if (g.swallow > 0 || d < portalRadius * 0.55) { // past the rim there is no way back
+      g.swallow = Math.min(1, g.swallow + dt * 1.3);
+      const k = Math.min(1, dt * 5);
+      g.points.position.x += dx * k; g.points.position.y += dy * k;
+      g.vel.multiplyScalar(Math.exp(-4 * dt));
+      if (g.swallow >= 1) { killGalaxy(g); portalPulse = 1; ring(portal.position, 700, 9, 0.5); }
+    } else if (d < reach) {
+      const acc = (3.5 + 7 * portalAge / (portalAge + 4)) * (1 - 0.6 * d / reach);
+      g.vel.x += (dx - dy * 0.3) / d * acc * dt; g.vel.y += (dy + dx * 0.3) / d * acc * dt; // spiral inward
+      g.vel.multiplyScalar(Math.exp(-1.5 * dt));
+      g.age = Math.min(g.age, GALAXY_LIFE - 4);
+    }
+  }
+
   if (!portal.visible) return;
-  portal.scale.setScalar(portalRadius * (0.3 + 0.7 * portalOpen));
-  portal.rotation.z += dt * 0.15;
+  portal.scale.setScalar(portalRadius * (0.2 + 0.8 * portalOpen) * (1 + 0.06 * portalPulse));
   const u = portalMat.uniforms;
-  u.uTime.value += dt; u.uOpen.value = portalOpen;
+  u.uTime.value += dt; u.uOpen.value = portalOpen; u.uPulse.value = portalPulse;
   u.uA.value.copy(palette[0]); u.uB.value.copy(palette[1]); u.uC.value.copy(palette[2]);
 }
 
@@ -446,7 +560,7 @@ class Hand {
 
   release() {
     if (this.galaxy) {
-      this.galaxy.held = false;
+      this.galaxy.held = false; this.galaxy.growing = false;
       this.galaxy.vel.copy(this.vel).multiplyScalar(0.35).clampLength(0, 5);
       this.galaxy = null;
     }
@@ -480,9 +594,9 @@ class Hand {
       pickColor(0.8); // hot core
       spawn(p.x + rnd(0.05), p.y + rnd(0.05), p.z, 0, 0, 0, cr * 0.4, cg * 0.4, cb * 0.4, 0.2, 0.3 + 0.6 * this.charge);
     } else if (g === 'pinch') {
-      if (!this.galaxy) this.galaxy = acquireGalaxy(this.pinchPt);
+      if (!this.galaxy) this.galaxy = grabGalaxy(this.pinchPt) || acquireGalaxy(this.pinchPt);
       if (this.galaxy) {
-        this.galaxy.points.position.lerp(this.pinchPt, Math.min(1, dt * 14));
+        this.galaxy.points.position.lerp(this.pinchPt, Math.min(1, dt * (this.galaxy.growing ? 14 : 7)));
         const q = this.pinchPt, r = this.galaxy.points.scale.x; // nearby stars fall into orbit
         wells.push({ x: q.x, y: q.y, z: q.z, g: 6, r0: r * 0.9, swirl: 5, range: 2 + r * 1.5 });
       }
@@ -526,13 +640,20 @@ function classify(lm, aspect, prev) {
   // straight finger stays straight even when it is aimed at the camera and looks short.
   const straight = [[5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]]
     .map(([a, b, c, e]) => flat(a, e) / ((flat(a, b) + flat(b, c) + flat(c, e)) || 1e-6));
-  const others = Math.max(straight[1], straight[2], straight[3]), wasPoint = prev === 'point';
-  const indexOut = straight[0] > (wasPoint ? T.pointStraight - 0.08 : T.pointStraight)
-    && straight[0] - others > (wasPoint ? T.pointLead * 0.5 : T.pointLead)
-    && !ext[1] && !ext[2] && !ext[3];
+  const loose = g => (prev === g ? 0.08 : 0), lead = g => (prev === g ? T.pointLead * 0.5 : T.pointLead);
   const pinching = d(4, 8) / size < (prev === 'pinch' ? T.pinchOff : T.pinchOn);
-  // Pointing wins over a fist: an extended index finger never gathers, whatever the other fingers do.
+  // These three outrank a fist: if the hand is clearly making one of them it never gathers,
+  // whatever the remaining fingers are doing.
+  const indexOut = straight[0] > T.pointStraight - loose('point')
+    && straight[0] - Math.max(straight[1], straight[2], straight[3]) > lead('point')
+    && !ext[1] && !ext[2] && !ext[3];
   if (indexOut && !pinching) return 'point';
+  const twoOut = Math.min(straight[0], straight[1]) > T.pointStraight - loose('peace')
+    && Math.min(straight[0], straight[1]) - Math.max(straight[2], straight[3]) > lead('peace')
+    && !ext[2] && !ext[3];
+  if (twoOut && !pinching) return 'peace';
+  // a pinch needs the index finger reaching out to the thumb, not folded into the palm as in a fist
+  if (pinching && straight[0] > T.pinchIndexOpen) return 'pinch';
   if (bent.every(Boolean)) return 'fist';
   if (pinching) return 'pinch';
   if (ext.every(Boolean)) return 'open';
@@ -671,4 +792,4 @@ function frame() {
 }
 frame();
 
-window.__universe = { hands, burst, setPalette, get mode() { return mode; } };
+window.__universe = { hands, galaxies, burst, setPalette, get mode() { return mode; } };
