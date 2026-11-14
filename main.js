@@ -29,6 +29,9 @@ const T = {
   galaxyMax: 3.2,      // radius it reaches if the pinch is held the full time
   galaxyGrowTime: 6,   // seconds of holding to go from min to max
   tiltDepth: 2.5,      // how strongly tipping the hand toward/away from the camera tilts a held galaxy
+  nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
+  nebulaMin: 0.5,      // its width at that moment
+  nebulaMax: 10,       // ...and the widest it can be pulled
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -447,11 +450,11 @@ const portalMat = new THREE.ShaderMaterial({
       // faint nebula swirling down the throat
       float sw = a + uTime * 0.6 + 2.6 * log(r + 0.06);
       float n = fbm(vec2(cos(sw), sin(sw)) * 1.6 + (0.9 / (r + 0.2) + uTime * 0.5) * vec2(0.8, 0.6));
-      vec3 col = mix(uC, uA, smoothstep(0.1, 1.0, r)) * pow(n, 2.4) * 0.5;
+      vec3 col = mix(uC, uA, smoothstep(0.1, 1.0, r)) * pow(n, 2.4) * 0.3;
 
       // stars streaking out of the centre at warp speed
       float an = a / 6.2831853 + 0.5;
-      for (int i = 0; i < 3; i++) {
+      for (int i = 0; i < 2; i++) {
         float fi = float(i), cells = 36.0 + 22.0 * fi;
         float c = an * cells;
         float id = mod(floor(c), cells), f = fract(c) - 0.5;
@@ -460,21 +463,20 @@ const portalMat = new THREE.ShaderMaterial({
         float rs = s * s * 1.05, len = 0.02 + 0.28 * s;
         float along = smoothstep(rs - len, rs, r) * smoothstep(rs + 0.015, rs, r);
         float across = smoothstep(0.5, 0.0, abs(f) * (1.0 + 6.0 * (1.0 - rnd2)));
-        col += mix(vec3(1.0), mix(uA, uB, rnd), 0.55) * along * across * across * (0.4 + 1.2 * s);
+        col += mix(vec3(1.0), mix(uA, uB, rnd), 0.55) * along * across * across * (0.15 + 0.5 * s);
       }
-      col += vec3(1.0, 0.96, 0.9) * 0.0025 / (r * r + 0.006);
+      col += mix(uC, vec3(1.0), 0.5) * 0.0012 / (r * r + 0.006);
       col *= inside;
 
-      // the rim: a hot white line inside a two-colour glow, with arcs licking outward
-      float flick = 0.7 + 0.8 * fbm(vec2(cos(a + uTime * 1.3), sin(a + uTime * 1.3)) * 3.0 + uTime * 0.6);
-      vec3 rimCol = mix(uA, uB, 0.5 + 0.5 * sin(a * 2.0 - uTime * 2.2));
-      float line = exp(-pow((r - 1.0) / 0.022, 2.0)), glow = exp(-pow((r - 1.0) / 0.09, 2.0));
-      col += (rimCol * glow * 0.55 * flick + mix(rimCol, vec3(1.0), 0.6) * line * 0.6) * (1.0 + 1.5 * uPulse);
-      float arcs = pow(fbm(vec2(cos(a) * 4.0 + uTime * 0.8, sin(a) * 4.0 - uTime * 0.5) + r * 3.0), 3.0);
-      col += rimCol * arcs * exp(-max(r - 1.0, 0.0) * 4.5) * step(1.0, r) * 1.4;
+      // the rim: a thin bright thread inside a wide, soft halo in the current colours
+      float flick = 0.85 + 0.3 * fbm(vec2(cos(a + uTime * 0.7), sin(a + uTime * 0.7)) * 2.0 + uTime * 0.3);
+      vec3 rimCol = mix(uA, uB, 0.5 + 0.5 * sin(a * 2.0 - uTime * 1.2));
+      float dr = r - 1.0;
+      float line = exp(-pow(dr / 0.014, 2.0)), glow = exp(-pow(dr / (dr > 0.0 ? 0.2 : 0.07), 2.0));
+      col += (rimCol * glow * 0.2 * flick + mix(rimCol, vec3(1.0), 0.3) * line * 0.38) * (1.0 + 0.9 * uPulse);
 
       // premultiplied: the disc hides the stars behind it, everything else adds light
-      gl_FragColor = vec4(col * uOpen, inside * 0.94 * uOpen);
+      gl_FragColor = vec4(col * uOpen, inside * 0.8 * uOpen);
     }`,
   blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
   depthWrite: false, depthTest: false, transparent: true,
@@ -489,19 +491,20 @@ function updatePortal(dt, active, a, b) {
   portalPulse = Math.max(0, portalPulse - dt * 1.8);
   portal.visible = portalOpen > 0.01;
   if (active) {
-    const target = Math.max(1.0, a.distanceTo(b) / 2);
+    // sized to sit in the gap between the two palms rather than spill past them
+    const target = THREE.MathUtils.clamp(Math.hypot(a.x - b.x, a.y - b.y) / 2 - 1.0, 0.35, 2.4);
     portalRadius += (target - portalRadius) * Math.min(1, dt * 8);
     portal.position.lerpVectors(a, b, 0.5); portal.position.z = -0.2;
-    if (!portalWas) { portalAge = 0; portalPulse = 1; ring(portal.position, 900, 8, 0.4); } // it tears open
+    if (!portalWas) { portalAge = 0; portalPulse = 1; ring(portal.position, 220, 3.5, 0.2); } // it opens with a soft ripple
     portalAge += dt;
     // background stars get drawn onto the rim and race around it
-    wells.push({ x: portal.position.x, y: portal.position.y, z: 0, g: 7, r0: portalRadius * 1.25, swirl: 9, range: portalRadius * 3 + 2 });
-    for (let i = 0; i < 22; i++) {
-      const ang = Math.random() * TAU, c = Math.cos(ang), s = Math.sin(ang), v = 3 + Math.random() * 3;
+    wells.push({ x: portal.position.x, y: portal.position.y, z: 0, g: 3, r0: portalRadius * 1.2, swirl: 4, range: portalRadius * 2.5 + 1.5 });
+    for (let i = 0; i < 5; i++) {
+      const ang = Math.random() * TAU, c = Math.cos(ang), s = Math.sin(ang), v = 1 + Math.random() * 1.5;
       pickColor(0.3);
       spawn(portal.position.x + c * portalRadius, portal.position.y + s * portalRadius, 0,
         -s * v + c * (Math.random() - 0.3) * 2, c * v + s * (Math.random() - 0.3) * 2, (Math.random() - 0.5),
-        cr, cg, cb, 0.5 + Math.random() * 0.9, 0.04 + Math.random() * 0.05);
+        cr, cg, cb, 0.5 + Math.random() * 0.9, 0.03 + Math.random() * 0.03);
     }
   }
   portalWas = active;
@@ -513,12 +516,12 @@ function updatePortal(dt, active, a, b) {
     if (!active) { g.swallow = Math.max(0, g.swallow - dt * 2); continue; } // it closed in time: the galaxy recovers
     const dx = portal.position.x - g.points.position.x, dy = portal.position.y - g.points.position.y;
     const d = Math.hypot(dx, dy) + 1e-3;
-    if (g.swallow > 0 || d < portalRadius * 0.55) { // past the rim there is no way back
+    if (g.swallow > 0 || d < Math.max(0.6, portalRadius * 0.7)) { // past the rim there is no way back
       g.swallow = Math.min(1, g.swallow + dt * 1.3);
       const k = Math.min(1, dt * 5);
       g.points.position.x += dx * k; g.points.position.y += dy * k;
       g.vel.multiplyScalar(Math.exp(-4 * dt));
-      if (g.swallow >= 1) { killGalaxy(g); portalPulse = 1; ring(portal.position, 700, 9, 0.5); }
+      if (g.swallow >= 1) { killGalaxy(g); portalPulse = 1; ring(portal.position, 300, 5, 0.3); }
     } else if (d < reach) {
       const acc = (3.5 + 7 * portalAge / (portalAge + 4)) * (1 - 0.6 * d / reach);
       g.vel.x += (dx - dy * 0.3) / d * acc * dt; g.vel.y += (dy + dx * 0.3) / d * acc * dt; // spiral inward
@@ -528,10 +531,88 @@ function updatePortal(dt, active, a, b) {
   }
 
   if (!portal.visible) return;
-  portal.scale.setScalar(portalRadius * (0.2 + 0.8 * portalOpen) * (1 + 0.06 * portalPulse));
+  portal.scale.setScalar(portalRadius * (0.2 + 0.8 * portalOpen) * (1 + 0.04 * portalPulse));
   const u = portalMat.uniforms;
   u.uTime.value += dt; u.uOpen.value = portalOpen; u.uPulse.value = portalPulse;
   u.uA.value.copy(palette[0]); u.uB.value.copy(palette[1]); u.uC.value.copy(palette[2]);
+}
+
+// --- nebulae: touch two pointing fingertips together, then draw them apart to stretch a cloud between them
+const NEBULA_LIFE = 60;
+function makeNebula() {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 },
+      uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() }, uC: { value: new THREE.Color() } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      varying vec2 vUv; uniform float uTime, uSeed, uAlpha; uniform vec3 uA, uB, uC;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+        return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+      float fbm(vec2 p){ float v = 0.0, a = 0.5; for(int i=0;i<6;i++){ v += a*noise(p); p = p*2.03 + 17.0; a *= 0.5; } return v; }
+      void main(){
+        vec2 p = (vUv - 0.5) * 2.0;
+        vec2 q = p * 2.0 + uSeed;
+        vec2 w = vec2(fbm(q + uTime * 0.035), fbm(q + 5.2 - uTime * 0.03));   // slow billowing
+        float n = fbm(q + w * 1.8), n2 = fbm(q * 2.3 + w * 2.5 + 9.0);
+        float mask = smoothstep(1.0, 0.1, length(p * vec2(1.0, 1.2)) + (n - 0.5) * 0.9) * smoothstep(1.0, 0.72, length(p));
+        float cloud = pow(n, 1.7) * 1.9;
+        float fil = pow(1.0 - abs(n2 * 2.0 - 1.0), 5.0);                       // bright filaments
+        float dust = smoothstep(0.38, 0.6, fbm(q * 1.7 - w * 1.4 + 3.0));      // dark lanes
+        vec3 col = mix(uA, uB, smoothstep(0.35, 0.65, w.x)) * cloud + uC * fil * 0.55;
+        col *= mix(0.25, 1.0, dust);
+        vec2 sp = p * 46.0 + uSeed; vec2 f = fract(sp) - 0.5;                   // young stars inside the cloud
+        col += vec3(1.0, 0.96, 0.9) * step(0.985, hash(floor(sp))) * smoothstep(0.3, 0.0, length(f)) * 1.6;
+        gl_FragColor = vec4(col * mask * uAlpha * 0.17, 1.0);
+      }`,
+    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, transparent: true,
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+  mesh.visible = false; mesh.renderOrder = 1.5; mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { mesh, mat, alive: false, held: false, age: 0, born: 0, size: 1 };
+}
+const nebulae = Array.from({ length: 4 }, makeNebula);
+let nebula = null, nebulaLost = 0; // the one being pulled right now
+
+function updateNebulae(dt, L, R) {
+  const both = L.active && R.active && L.gesture === 'point' && R.gesture === 'point';
+  if (both) {
+    const a = L.tips[1], b = R.tips[1], d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (!nebula && d < T.nebulaTouch) {
+      const n = nebulae.find(x => !x.alive) || nebulae.slice().sort((x, y) => y.age - x.age)[0];
+      const u = n.mat.uniforms, i = (Math.random() * palette.length) | 0;
+      u.uA.value.copy(palette[i]); u.uB.value.copy(palette[(i + 1) % palette.length]); u.uC.value.copy(palette[(i + 2) % palette.length]);
+      u.uSeed.value = Math.random() * 100;
+      n.alive = n.held = true; n.age = n.born = 0; n.size = T.nebulaMin;
+      n.mesh.visible = true; n.mesh.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, -0.5);
+      n.mesh.rotation.z = Math.atan2(b.y - a.y, b.x - a.x);
+      nebula = n;
+    }
+    if (nebula) {
+      nebulaLost = 0;
+      const k = Math.min(1, dt * 10), m = nebula.mesh;
+      nebula.size += (THREE.MathUtils.clamp(d, T.nebulaMin, T.nebulaMax) - nebula.size) * k;
+      m.position.x += ((a.x + b.x) / 2 - m.position.x) * k; m.position.y += ((a.y + b.y) / 2 - m.position.y) * k;
+      // lies along the line between the fingertips; a half-turn either way is the same line, so take the nearer one
+      let ang = Math.atan2(b.y - a.y, b.x - a.x);
+      ang += Math.PI * Math.round((m.rotation.z - ang) / Math.PI);
+      m.rotation.z += (ang - m.rotation.z) * k;
+      for (const t of [a, b]) { // a spark at each fingertip
+        pickColor(0.5);
+        spawn(t.x + rnd(0.05), t.y + rnd(0.05), t.z, rnd(0.5), rnd(0.5), rnd(0.3), cr, cg, cb, 0.3 + Math.random() * 0.5, 0.04 + Math.random() * 0.04);
+      }
+    }
+  } else if (nebula && (nebulaLost += dt) > 0.3) { nebula.held = false; nebula = null; }
+
+  for (const n of nebulae) {
+    if (!n.alive) continue;
+    n.born += dt;
+    if (n.held) n.age = 0; else if ((n.age += dt) > NEBULA_LIFE) { n.alive = false; n.mesh.visible = false; continue; }
+    n.mesh.scale.set(n.size * 1.5 + 0.4, n.size * 1.05 + 0.4, 1);
+    n.mat.uniforms.uTime.value += dt * (n.held ? 2.5 : 1);
+    n.mat.uniforms.uAlpha.value = Math.min(1, n.born * 2.5) * Math.min(1, (NEBULA_LIFE - n.age) / 5);
+  }
 }
 
 // ---------------------------------------------------------------- hands
@@ -624,7 +705,7 @@ class Hand {
     this.hasQuat = true;
   }
 
-  act(now, dt, portalActive) {
+  act(now, dt, portalActive, sculpting) {
     const g = this.gesture, p = this.pos;
     if (g !== 'pinch') this.release();
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
@@ -665,7 +746,7 @@ class Hand {
         const q = this.pinchPt, r = this.galaxy.points.scale.x; // nearby stars fall into orbit
         wells.push({ x: q.x, y: q.y, z: q.z, g: 6, r0: r * 0.9, swirl: 5, range: 2 + r * 1.5 });
       }
-    } else if (g === 'point') {
+    } else if (g === 'point' && !sculpting) {
       const tip = this.tips[1], n = 14;
       for (let k = 0; k < n; k++) { // interpolate so fast strokes stay continuous
         _v.lerpVectors(this.prevTip, tip, k / n);
@@ -864,7 +945,8 @@ function frame() {
     if (h.active && now - h.lastSeen > 0.35) h.deactivate();
   }
   const portalActive = L.active && R.active && L.gesture === 'open' && R.gesture === 'open';
-  for (const h of [L, R]) { if (h.active) h.act(now, dt, portalActive); h.drawSkeleton(); }
+  updateNebulae(dt, L, R);
+  for (const h of [L, R]) { if (h.active) h.act(now, dt, portalActive, !!nebula); h.drawSkeleton(); }
 
   updatePortal(dt, portalActive, L.pos, R.pos);
   updateGalaxies(dt);
@@ -873,8 +955,8 @@ function frame() {
 
   for (const g in chips) {
     const names = g.split(' ');
-    chips[g].classList.toggle('active', g === 'portal' ? portalActive
-      : !portalActive && ((L.active && names.includes(L.gesture)) || (R.active && names.includes(R.gesture))));
+    chips[g].classList.toggle('active', g === 'portal' ? portalActive : g === 'nebula' ? !!nebula
+      : !portalActive && !(nebula && g === 'point') && ((L.active && names.includes(L.gesture)) || (R.active && names.includes(R.gesture))));
   }
 
   // gentle parallax toward the hands
@@ -889,4 +971,4 @@ function frame() {
 }
 frame();
 
-window.__universe = { hands, galaxies, burst, setPalette, get mode() { return mode; } };
+window.__universe = { hands, galaxies, nebulae, burst, setPalette, get mode() { return mode; } };
