@@ -49,7 +49,8 @@ let palette = PALETTES[0].colors;
 // ---------------------------------------------------------------- scene
 const canvas = document.getElementById('stage');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+let pixelRatio = Math.min(window.devicePixelRatio, 1.5);
+renderer.setPixelRatio(pixelRatio);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x02030a);
@@ -172,12 +173,13 @@ for (let i = 0; i < AMB; i++) {
   aCol[j] = (0.6 + 0.4 * warm) * k; aCol[j + 1] = (0.72 + 0.18 * warm) * k; aCol[j + 2] = (1.0 - 0.25 * warm) * k;
   aSize[i] = 0.05 + Math.random() * 0.08; aFade[i] = 0.6;
 }
-let ambientPlaced = false;
+let ambientPlaced = false, ambN = AMB; // a narrow (portrait) view shows fewer stars, or it would be packed solid
 function layoutAmbient() {
   for (let i = 0; i < AMB; i++) {
     const j = i * 3, z = aSeed[j + 2], s = (camera.position.z - z) / camera.position.z; // fill the view frustum
     aHome[j] = aSeed[j] * viewW * 0.62 * s; aHome[j + 1] = aSeed[j + 1] * viewH * 0.62 * s; aHome[j + 2] = z;
   }
+  ambN = Math.round(AMB * Math.min(1, Math.max(0.35, viewW / viewH / 1.6)));
   if (!ambientPlaced) { aPos.set(aHome); ambientPlaced = true; }
 }
 layoutAmbient();
@@ -203,7 +205,8 @@ function updateAmbient(dt) {
   // between them instead of whichever closed first keeping everything.
   let nf = 0;
   for (let w = 0; w < nw; w++) if (wells[w].fist) nf++;
-  for (let i = 0; i < AMB; i++) {
+  aGeo.setDrawRange(0, ambN);
+  for (let i = 0; i < ambN; i++) {
     const j = i * 3, x = aPos[j], y = aPos[j + 1], z = aPos[j + 2];
     // heat 2..1: riding the blast outward; 1..0: being drawn smoothly back home
     const heat = aHeat[i], out = heat > 1 ? heat - 1 : 0, back = heat > 1 ? 0 : heat, bump = 4 * back * (1 - back);
@@ -253,7 +256,7 @@ function updateAmbient(dt) {
 function burst(p, power, vel) {
   const sp = 6 + 15 * power, gathered = 1.6 + 1.6 * power;
   blasts.push({ x: p.x, y: p.y, z: p.z, sp, t: 0 });
-  for (let i = 0; i < AMB; i++) {
+  for (let i = 0; i < ambN; i++) {
     const j = i * 3, dx = aPos[j] - p.x, dy = aPos[j + 1] - p.y, dz = aPos[j + 2] - p.z;
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (d > 7) continue;
@@ -874,7 +877,10 @@ async function startCamera() {
   try { landmarker = await make('GPU'); } catch { landmarker = await make('CPU'); }
   mode = 'camera';
   video.classList.add('on');
-  hintEl.textContent = 'Stand back so the camera sees your hands · V toggles the camera preview · F for full screen';
+  camBtn.hidden = false;
+  hintEl.textContent = matchMedia('(pointer: coarse)').matches
+    ? 'Prop your device up and step back so the camera can see both hands'
+    : 'Stand back so the camera sees your hands · V toggles the camera preview · F for full screen';
 }
 
 function trackCamera(now, dt) {
@@ -923,7 +929,7 @@ const introEl = document.getElementById('intro'), statusEl = document.getElement
 const hudEl = document.getElementById('hud'), hintEl = document.getElementById('hint'), paletteEl = document.getElementById('palette');
 const chips = Object.fromEntries([...document.querySelectorAll('.chip')].map(c => [c.dataset.g, c]));
 function setStatus(msg, err = false) { statusEl.textContent = msg; statusEl.classList.toggle('err', err); }
-function enter() { setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
+function enter() { keepAwake(); setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
 
 document.getElementById('startCam').addEventListener('click', async e => {
   e.currentTarget.disabled = true;
@@ -937,31 +943,71 @@ document.getElementById('startCam').addEventListener('click', async e => {
     e.currentTarget.disabled = false;
   }
 });
-window.addEventListener('keydown', e => { if ((e.key === 'v' || e.key === 'V') && mode === 'camera') video.classList.toggle('on'); });
-
-// full screen: button in the corner, or the F key
-const fsBtn = document.getElementById('fs');
-function toggleFullscreen() {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else document.documentElement.requestFullscreen().catch(err => console.warn('Full screen was refused:', err));
+// camera preview: button in the corner, or the V key
+const camBtn = document.getElementById('camBtn');
+function toggleCam() {
+  if (mode !== 'camera') return;
+  const on = video.classList.toggle('on');
+  camBtn.classList.toggle('off', !on);
+  camBtn.title = on ? 'Hide camera preview (V)' : 'Show camera preview (V)';
 }
-if (document.fullscreenEnabled) {
+camBtn.addEventListener('click', e => { toggleCam(); e.currentTarget.blur(); });
+window.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') toggleCam(); });
+
+// full screen: button in the corner, or the F key (older iPads only have the webkit-prefixed API; iPhones have none)
+const fsBtn = document.getElementById('fs'), rootEl = document.documentElement;
+const requestFs = rootEl.requestFullscreen || rootEl.webkitRequestFullscreen;
+const exitFs = document.exitFullscreen || document.webkitExitFullscreen;
+const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+function toggleFullscreen() {
+  try {
+    const p = fsElement() ? exitFs.call(document) : requestFs.call(rootEl);
+    p?.catch?.(err => console.warn('Full screen was refused:', err));
+  } catch (err) { console.warn('Full screen was refused:', err); }
+}
+if (requestFs && exitFs && (document.fullscreenEnabled ?? document.webkitFullscreenEnabled) !== false) {
   fsBtn.addEventListener('click', e => { toggleFullscreen(); e.currentTarget.blur(); });
   window.addEventListener('keydown', e => { if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) toggleFullscreen(); });
-  document.addEventListener('fullscreenchange', () => {
-    const on = !!document.fullscreenElement;
+  const onFsChange = () => {
+    const on = !!fsElement();
     fsBtn.classList.toggle('on', on);
     fsBtn.title = on ? 'Exit full screen (F or Esc)' : 'Full screen (F)';
-  });
+  };
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
 } else fsBtn.hidden = true;
+
+// Nobody touches the screen while playing, so stop the device dimming or locking, and pick the
+// camera back up when the tab or app comes back to the front.
+let wakeLock = null;
+async function keepAwake() {
+  try { if (navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } }
+  catch { wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || mode !== 'camera') return;
+  keepAwake();
+  video.play().catch(() => {});
+});
 setPalette(0);
 
 // ---------------------------------------------------------------- main loop
-let last = performance.now() / 1000, idleT = 0, nextMeteor = 4, meteor = null;
+let last = performance.now() / 1000, idleT = 0, nextMeteor = 4, meteor = null, perfT = 0, perfN = 0;
 function frame() {
   requestAnimationFrame(frame);
-  const now = performance.now() / 1000, dt = Math.min(0.05, now - last);
+  const now = performance.now() / 1000, rawDt = now - last, dt = Math.min(0.05, rawDt);
   last = now;
+  // on a device that cannot keep up, trade resolution for smoothness
+  if (mode === 'camera' && rawDt < 0.25) {
+    perfT += rawDt; perfN++;
+    if (perfT >= 2) {
+      if (perfN / perfT < 38 && pixelRatio > 0.75) {
+        pixelRatio = Math.max(0.75, pixelRatio - 0.25);
+        renderer.setPixelRatio(pixelRatio); composer.setPixelRatio(pixelRatio); resize();
+      }
+      perfT = perfN = 0;
+    }
+  }
   wells.length = 0;
 
   if (mode === 'camera') trackCamera(now, dt);
@@ -1017,4 +1063,4 @@ function frame() {
 }
 frame();
 
-window.__universe = { hands, galaxies, nebulae, burst, setPalette, get mode() { return mode; } };
+window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, get mode() { return mode; } };
