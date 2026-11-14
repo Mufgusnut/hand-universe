@@ -16,6 +16,8 @@ const T = {
   curled: 1.35,      // below this = finger curled
   pinchOn: 0.32,     // thumb-index distance / hand size to start a pinch
   pinchOff: 0.5,     // ...and to release it
+  pointStraight: 0.88, // index finger straightness needed to count as pointing
+  pointLead: 0.15,     // ...and how much straighter it must be than the other three fingers
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -514,13 +516,25 @@ function setPalette(i) {
 }
 
 // ---------------------------------------------------------------- gesture recognition
-function classify(lm, aspect, wasPinch) {
+function classify(lm, aspect, prev) {
   const d = (a, b) => Math.hypot((lm[a].x - lm[b].x) * aspect, lm[a].y - lm[b].y, (lm[a].z - lm[b].z) * aspect);
+  const flat = (a, b) => Math.hypot((lm[a].x - lm[b].x) * aspect, lm[a].y - lm[b].y);
   const size = d(0, 9) || 1e-6;
   const curl = [[8, 5], [12, 9], [16, 13], [20, 17]].map(([tip, mcp]) => d(tip, 0) / (d(mcp, 0) || 1e-6));
   const ext = curl.map(c => c > T.extended), bent = curl.map(c => c < T.curled);
+  // How straight each finger is (1 = ruler-straight, ~0.5 = folded). Measured in the image plane, where a
+  // straight finger stays straight even when it is aimed at the camera and looks short.
+  const straight = [[5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]]
+    .map(([a, b, c, e]) => flat(a, e) / ((flat(a, b) + flat(b, c) + flat(c, e)) || 1e-6));
+  const others = Math.max(straight[1], straight[2], straight[3]), wasPoint = prev === 'point';
+  const indexOut = straight[0] > (wasPoint ? T.pointStraight - 0.08 : T.pointStraight)
+    && straight[0] - others > (wasPoint ? T.pointLead * 0.5 : T.pointLead)
+    && !ext[1] && !ext[2] && !ext[3];
+  const pinching = d(4, 8) / size < (prev === 'pinch' ? T.pinchOff : T.pinchOn);
+  // Pointing wins over a fist: an extended index finger never gathers, whatever the other fingers do.
+  if (indexOut && !pinching) return 'point';
   if (bent.every(Boolean)) return 'fist';
-  if (d(4, 8) / size < (wasPinch ? T.pinchOff : T.pinchOn)) return 'pinch';
+  if (pinching) return 'pinch';
   if (ext.every(Boolean)) return 'open';
   if (ext[0] && ext[1] && !ext[2] && !ext[3]) return 'peace';
   if (ext[0] && !ext[1] && !ext[2] && !ext[3]) return 'point';
@@ -574,7 +588,7 @@ function trackCamera(now, dt) {
     h.pos.multiplyScalar(0.2);
     TIP_IDS.forEach((id, k) => h.tips[k].copy(h.joints[id]));
     h.pinchPt.lerpVectors(h.joints[4], h.joints[8], 0.5);
-    h.setPose(now, dt, classify(lm, aspect, h.gesture === 'pinch'), fresh);
+    h.setPose(now, dt, classify(lm, aspect, h.gesture), fresh);
   });
 }
 
