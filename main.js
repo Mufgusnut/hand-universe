@@ -29,6 +29,7 @@ const T = {
   galaxyMax: 3.2,      // radius it reaches if the pinch is held the full time
   galaxyGrowTime: 6,   // seconds of holding to go from min to max
   tiltDepth: 2.5,      // how strongly tipping the hand toward/away from the camera tilts a held galaxy
+  portalDelay: 2.8,    // seconds after a supernova before two open hands may open a portal
   nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
@@ -163,7 +164,7 @@ function updateParticles(dt) {
 const AMB = 9000;
 const aPos = new Float32Array(AMB * 3), aVel = new Float32Array(AMB * 3), aHome = new Float32Array(AMB * 3);
 const aSeed = new Float32Array(AMB * 3), aCol = new Float32Array(AMB * 3);
-const aSize = new Float32Array(AMB), aFade = new Float32Array(AMB);
+const aSize = new Float32Array(AMB), aFade = new Float32Array(AMB), aHeat = new Float32Array(AMB);
 for (let i = 0; i < AMB; i++) {
   const j = i * 3, warm = Math.random(), k = 0.22 + Math.random() * 0.45;
   aSeed[j] = Math.random() * 2 - 1; aSeed[j + 1] = Math.random() * 2 - 1; aSeed[j + 2] = -9 + Math.random() * 10.5;
@@ -197,7 +198,9 @@ function updateAmbient(dt) {
   const k = strong ? 0.08 : 1.2; // homing spring relaxes while something is gathering
   for (let i = 0; i < AMB; i++) {
     const j = i * 3, x = aPos[j], y = aPos[j + 1], z = aPos[j + 2];
-    let ax = (aHome[j] - x) * k, ay = (aHome[j + 1] - y) * k, az = (aHome[j + 2] - z) * k;
+    const heat = aHeat[i], kh = heat > 0 ? k * Math.max(0, 1 - heat * 1.5) : k;
+    if (heat > 0) aHeat[i] = Math.max(0, heat - dt * 0.45);
+    let ax = (aHome[j] - x) * kh, ay = (aHome[j + 1] - y) * kh, az = (aHome[j + 2] - z) * kh;
     for (let w = 0; w < nw; w++) {
       const W = wells[w], dx = W.x - x, dy = W.y - y, dz = W.z - z;
       if (W.g < 0) { // repel (open hand): stars part around it
@@ -214,7 +217,7 @@ function updateAmbient(dt) {
     const vx = (aVel[j] + ax * dt) * drag, vy = (aVel[j + 1] + ay * dt) * drag, vz = (aVel[j + 2] + az * dt) * drag;
     aVel[j] = vx; aVel[j + 1] = vy; aVel[j + 2] = vz;
     aPos[j] = x + vx * dt; aPos[j + 1] = y + vy * dt; aPos[j + 2] = z + vz * dt;
-    aFade[i] = Math.min(2, 0.55 + Math.sqrt(vx * vx + vy * vy + vz * vz) * 0.12); // moving stars glow
+    aFade[i] = Math.min(2, 0.55 + Math.sqrt(vx * vx + vy * vy + vz * vz) * 0.12) + heat * 0.45; // moving stars glow
   }
   aGeo.attributes.position.needsUpdate = true;
   aGeo.attributes.aFade.needsUpdate = true;
@@ -222,12 +225,26 @@ function updateAmbient(dt) {
 
 // ---------------------------------------------------------------- effects
 function burst(p, power, vel) {
-  const sp = 6 + 15 * power;
-  for (let i = 0; i < AMB; i++) { // fling the background stars
+  const sp = 6 + 15 * power, gathered = 1.6 + 1.6 * power;
+  for (let i = 0; i < AMB; i++) {
     const j = i * 3, dx = aPos[j] - p.x, dy = aPos[j + 1] - p.y, dz = aPos[j + 2] - p.z;
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (d > 7) continue;
-    const k = sp * (0.6 + Math.random() * 0.8) / (d + 0.4) / (d + 0.05);
+    if (d < gathered) {
+      // a star the fist pulled in: it is thrown outward in its own direction, glowing hot, trailing a spark
+      const a = Math.random() * TAU, z = Math.random() * 2 - 1, q = Math.sqrt(1 - z * z), inv = 1 / (d + 0.05);
+      let ux = dx * inv + q * Math.cos(a) * 0.45, uy = dy * inv + q * Math.sin(a) * 0.45, uz = dz * inv * 0.5 + z * 0.35;
+      const n = 1 / (Math.hypot(ux, uy, uz) + 1e-3), v = sp * (0.3 + 0.7 * Math.cbrt(Math.random()));
+      ux *= n * v; uy *= n * v; uz *= n * v;
+      aVel[j] = ux + vel.x * 0.3; aVel[j + 1] = uy + vel.y * 0.3; aVel[j + 2] = uz * 0.6;
+      aHeat[i] = 0.7 + Math.random() * 0.5;
+      pickColor(Math.random() < 0.2 ? 0.7 : 0.1);
+      const t = 0.55 + Math.random() * 0.4;
+      spawn(aPos[j], aPos[j + 1], aPos[j + 2], ux * t + vel.x * 0.3, uy * t + vel.y * 0.3, uz * 0.6 * t,
+        cr, cg, cb, 1 + Math.random() * 2.2, 0.05 + Math.random() * 0.08);
+      continue;
+    }
+    const k = sp * (0.6 + Math.random() * 0.8) / (d + 0.4) / (d + 0.05); // the rest are shoved by the blast
     aVel[j] += dx * k; aVel[j + 1] += dy * k; aVel[j + 2] += dz * k * 0.5;
   }
   // shove whatever is already nearby (this is what makes a charged fist a supernova)
@@ -240,7 +257,7 @@ function burst(p, power, vel) {
     pVel[j] += dx * k; pVel[j + 1] += dy * k; pVel[j + 2] += dz * k;
     pLife[i] = Math.max(pLife[i], 1.2); pMax[i] = Math.max(pMax[i], pLife[i]);
   }
-  const n = Math.floor(1500 + 5000 * power);
+  const n = Math.floor(250 + 700 * power); // just a flash at the heart of it
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2, z = Math.random() * 2 - 1, s = Math.sqrt(1 - z * z);
     const dx = s * Math.cos(a), dy = s * Math.sin(a), dz = z * 0.6;
@@ -249,7 +266,7 @@ function burst(p, power, vel) {
     spawn(p.x + dx * 0.1, p.y + dy * 0.1, p.z + dz * 0.1, dx * v + vel.x * 0.3, dy * v + vel.y * 0.3, dz * v,
       cr, cg, cb, 1.2 + Math.random() * 2.8, 0.05 + Math.random() * 0.1);
   }
-  ring(p, 500 + 1500 * power, sp * 1.3, 0.6);
+  ring(p, 300 + 800 * power, sp * 1.3, 0.6);
 }
 
 function ring(p, n, speed, whiten) {
@@ -944,7 +961,8 @@ function frame() {
   for (const h of [L, R]) {
     if (h.active && now - h.lastSeen > 0.35) h.deactivate();
   }
-  const portalActive = L.active && R.active && L.gesture === 'open' && R.gesture === 'open';
+  const novaBusy = Math.max(L.charge, R.charge) >= T.minCharge || now - Math.max(L.lastBurst, R.lastBurst) < T.portalDelay;
+  const portalActive = L.active && R.active && L.gesture === 'open' && R.gesture === 'open' && !novaBusy;
   updateNebulae(dt, L, R);
   for (const h of [L, R]) { if (h.active) h.act(now, dt, portalActive, !!nebula); h.drawSkeleton(); }
 
