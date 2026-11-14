@@ -66,6 +66,7 @@
   .chip { font-size: 12.5px; letter-spacing: .04em; color: var(--dim); padding: 7px 13px; border-radius: 999px;
     border: 1px solid rgba(255,255,255,.1); background: rgba(6,8,20,.55); backdrop-filter: blur(6px); transition: all .2s; }
   .chip b { color: var(--ink); font-weight: 600; margin-right: 6px; }
+  .chip b.in { margin-right: 0; }
   .chip.active { color: #fff; border-color: var(--blue); background: rgba(74,168,255,.22);
     box-shadow: 0 0 22px rgba(74,168,255,.45); transform: translateY(-2px); }
   #hint { font-size: 12px; color: var(--dim); letter-spacing: .05em; text-align: center; }
@@ -132,8 +133,7 @@
 
 <div id="hud">
   <div id="legend">
-    <span class="chip" data-g="open"><b>Open hand</b>explode</span>
-    <span class="chip" data-g="fist"><b>Fist</b>gather, then open for a supernova</span>
+    <span class="chip" data-g="fist open"><b>Fist</b>gather, then <b class="in">open</b> for a supernova</span>
     <span class="chip" data-g="pinch"><b>Pinch</b>grow a galaxy, or grab one</span>
     <span class="chip" data-g="point"><b>Point</b>draw with light</span>
     <span class="chip" data-g="peace"><b>Peace sign</b>change colors</span>
@@ -142,6 +142,6 @@
   <div id="hint"></div>
 </div>
 
-<script type="module" src="./main.js?v=5"></script>
+<script type="module" src="./main.js?v=6"></script>
 </body>
 </html>

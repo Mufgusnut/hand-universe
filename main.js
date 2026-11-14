@@ -19,7 +19,10 @@ const T = {
   pointStraight: 0.88, // index finger straightness needed to count as pointing
   pointLead: 0.15,     // ...and how much straighter it must be than the other three fingers
   pinchIndexOpen: 0.6, // index straightness above which thumb-on-index is a pinch, not a fist
-  grabRadius: 2.2,     // how near (world units) a pinch must be to pick up an existing galaxy
+  grabRadius: 2.8,     // how near (world units) a pinch must be to pick up an existing galaxy
+  grabFling: 1.2,      // a released galaxy only drifts if the hand was moving faster than this
+  fistDelay: 0.45,     // seconds after any point/pinch/peace during which a fist is ignored
+  fistHoldFrames: 4,   // a fist must persist this many frames before it starts gathering
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -197,7 +200,7 @@ function updateAmbient(dt) {
       if (W.range && d > W.range) continue;
       // pull onto a ring of radius r0 around the well, flatten into its plane, and swirl
       const m = Math.max(W.g * (d - W.r0) / ((d + 0.5) * d), -W.g * 0.5), s = W.swirl / (d + 0.6);
-      ax += (dx * m - dy * s) / d; ay += (dy * m + dx * s) / d; az += dz * 1.5;
+      ax += (dx * m - dy * s) / d; ay += (dy * m + dx * s) / d; az += dz * (W.flat ?? 1.5);
     }
     const vx = (aVel[j] + ax * dt) * drag, vy = (aVel[j + 1] + ay * dt) * drag, vz = (aVel[j + 2] + az * dt) * drag;
     aVel[j] = vx; aVel[j + 1] = vy; aVel[j + 2] = vz;
@@ -250,7 +253,7 @@ function ring(p, n, speed, whiten) {
 }
 
 // --- galaxies (GPU-animated, one draw call each; every galaxy is generated with its own shape and size)
-const GALAXY_N = 5000, GALAXY_LIFE = 45;
+const GALAXY_N = 10000, GALAXY_LIFE = 45;
 const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
 const rand = (a, b) => a + Math.random() * (b - a);
 const TAU = Math.PI * 2;
@@ -258,25 +261,38 @@ const TAU = Math.PI * 2;
 function shapeGalaxy(g) {
   const data = g.data, u = g.mat.uniforms;
   const kind = ['spiral', 'spiral', 'spiral', 'barred', 'barred', 'ring', 'elliptical', 'irregular'][(Math.random() * 8) | 0];
-  const put = (i, r, ang, h) => { const j = i * 4; data[j] = r; data[j + 1] = ang; data[j + 2] = h; data[j + 3] = Math.random(); };
+  const put = (i, r, ang, h, w = Math.random() * 0.96) => { const j = i * 4; data[j] = r; data[j + 1] = ang; data[j + 2] = h; data[j + 3] = w; };
+  // most arm stars sit in a tight lane, the rest form a soft haze around it
+  const lane = () => gauss() * (Math.random() < 0.65 ? 0.35 : 1.25);
+  // star-forming knots: small bright clumps strung along the arms
+  const knots = (armAngle, rMin) => {
+    const list = Array.from({ length: 10 + ((Math.random() * 10) | 0) }, () => { const r = rand(rMin, 0.95); return { r, a: armAngle(r, (Math.random() * 8) | 0) }; });
+    return i => { const k = list[(Math.random() * list.length) | 0], x = k.r * Math.cos(k.a) + gauss() * 0.022, z = k.r * Math.sin(k.a) + gauss() * 0.022;
+      put(i, Math.hypot(x, z), Math.atan2(z, x), gauss() * 0.015, rand(0.9, 1)); };
+  };
   let rigid = 0.35, diff = 0.25, squash = 1, maxScale = rand(0.9, 3.2);
 
   if (kind === 'spiral') {
     const arms = 2 + ((Math.random() * 4) | 0), twist = rand(2.5, 7), spread = rand(0.2, 0.55);
-    const bulge = rand(0.08, 0.25), bulgeR = rand(0.12, 0.25);
+    const bulge = rand(0.08, 0.22), bulgeR = rand(0.1, 0.22);
+    const knot = knots((r, n) => ((n % arms) / arms) * TAU + r * twist, 0.2);
     for (let i = 0; i < GALAXY_N; i++) {
-      if (Math.random() < bulge) { put(i, Math.random() * bulgeR, rand(0, TAU), gauss() * 0.07); continue; }
-      const r = 0.05 + Math.pow(Math.random(), 1.5) * 0.95;
-      put(i, r, ((i % arms) / arms) * TAU + r * twist + gauss() * spread * (1 - r * 0.5), gauss() * 0.035);
+      const v = Math.random();
+      if (v < bulge) { put(i, Math.pow(Math.random(), 1.6) * bulgeR, rand(0, TAU), gauss() * 0.06); continue; }
+      if (v > 0.93) { knot(i); continue; }
+      const r = 0.05 + Math.pow(Math.random(), 1.4) * 0.95;
+      put(i, r, ((i % arms) / arms) * TAU + r * twist + lane() * spread * (1 - r * 0.5), gauss() * 0.03);
     }
   } else if (kind === 'barred') {
     const bar = rand(0.25, 0.45), twist = rand(3, 6);
     rigid = 0.5; diff = 0.04; // turns almost rigidly so the bar holds together
+    const knot = knots((r, n) => (n % 2) * Math.PI + (r - bar) * twist, bar);
     for (let i = 0; i < GALAXY_N; i++) {
       const v = Math.random(), side = (i % 2) * Math.PI;
+      if (v > 0.94) { knot(i); continue; }
       if (v < 0.12) put(i, Math.random() * 0.12, rand(0, TAU), gauss() * 0.06);
       else if (v < 0.42) { const r = Math.random() * bar, w = gauss() * 0.05; put(i, Math.hypot(r, w), side + Math.atan2(w, r), gauss() * 0.03); }
-      else { const r = bar + Math.pow(Math.random(), 1.3) * (1 - bar); put(i, r, side + (r - bar) * twist + gauss() * 0.28, gauss() * 0.03); }
+      else { const r = bar + Math.pow(Math.random(), 1.3) * (1 - bar); put(i, r, side + (r - bar) * twist + lane() * 0.3, gauss() * 0.03); }
     }
   } else if (kind === 'ring') {
     const ringR = rand(0.6, 0.85), width = rand(0.04, 0.09);
@@ -332,9 +348,10 @@ function makeGalaxy() {
         vec3 p = vec3(cos(ang) * r, aData.z, sin(ang) * r * uSquash);
         vec4 mv = modelViewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mv;
-        gl_PointSize = (0.025 + 0.05 * aData.w) * uSize * uPx / max(0.1, -mv.z);
+        float knot = step(0.9, aData.w);            // the brightest few: knots and giant stars
+        gl_PointSize = (0.012 + 0.026 * aData.w + 0.018 * knot) * uSize * uPx / max(0.1, -mv.z);
         vec3 arm = mix(uA, uB, aData.w);
-        vColor = mix(uCore, arm, smoothstep(0.05, 0.45, r)) * uAlpha * (0.12 + 0.24 * aData.w);
+        vColor = mix(uCore, arm, smoothstep(0.04, 0.4, r)) * uAlpha * (0.07 + 0.13 * aData.w + 0.08 * knot);
       }`,
     fragmentShader: SPRITE_FRAG,
     blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, transparent: true,
@@ -357,19 +374,29 @@ function acquireGalaxy(p) {
   return g;
 }
 
-// Pinching on or near an existing galaxy picks it up instead of making a new one. The target is generous.
-function grabGalaxy(p) {
-  let best = null, bestD = Infinity;
+// A pinch picks up whatever galaxy is under or near it (the target is generous) and only makes a new one
+// in empty space. A galaxy whose holder has stopped being tracked can be taken over, so a hand that the
+// tracker briefly loses or relabels carries on holding the same galaxy instead of spawning another.
+function pinchGalaxy(p, hand, now) {
+  let best = null, bestD = Infinity, blocked = false;
   for (const g of galaxies) {
-    if (!g.alive || g.held || g.swallow > 0) continue;
+    if (!g.alive || g.swallow > 0) continue;
     const d = Math.hypot(g.points.position.x - p.x, g.points.position.y - p.y);
-    if (d < Math.max(T.grabRadius, g.radius + 0.8) && d < bestD) { best = g; bestD = d; }
+    if (d >= Math.max(T.grabRadius, g.radius + 1)) continue;
+    const busy = g.held && g.holder && g.holder !== hand && g.holder.gesture === 'pinch' && now - g.holder.lastSeen < 0.15;
+    if (busy) { blocked = true; continue; } // the other hand really is holding it
+    if (d < bestD) { best = g; bestD = d; }
   }
-  if (best) { best.held = true; best.growing = false; best.age = 0; best.vel.set(0, 0, 0); }
+  if (best) {
+    if (best.holder && best.holder !== hand && best.holder.galaxy === best) best.holder.galaxy = null;
+    if (!best.held) best.growing = false;
+    best.held = true; best.age = 0; best.vel.set(0, 0, 0);
+  } else if (!blocked) best = acquireGalaxy(p);
+  if (best) best.holder = hand;
   return best;
 }
 
-function killGalaxy(g) { g.alive = false; g.held = false; g.swallow = 0; g.points.visible = false; }
+function killGalaxy(g) { if (g.holder && g.holder.galaxy === g) g.holder.galaxy = null; g.holder = null; g.alive = false; g.held = false; g.swallow = 0; g.points.visible = false; }
 
 function updateGalaxies(dt) {
   for (const g of galaxies) {
@@ -387,7 +414,7 @@ function updateGalaxies(dt) {
     g.mat.uniforms.uSize.value = 0.2 + scale * 0.62;
     g.mat.uniforms.uTime.value += dt * (g.held && g.growing ? 2.2 : 1) * (1 + g.swallow * 7);
     const fadeIn = Math.min(1, g.grow * 3), fadeOut = g.held ? 1 : Math.min(1, (GALAXY_LIFE - g.age) / 3);
-    const density = Math.min(1, 0.1 + 0.26 * scale * scale); // same star count in less area would burn out
+    const density = Math.min(1, 0.12 + 0.24 * scale * scale); // same star count in less area would burn out
     g.mat.uniforms.uAlpha.value = fadeIn * fadeOut * density * (g.held && !g.growing ? 1.3 : 1);
   }
 }
@@ -532,16 +559,21 @@ class Hand {
   setPose(now, dt, rawGesture, fresh) {
     if (fresh) {
       this.prevPos.copy(this.pos); this.vel.set(0, 0, 0); this.prevTip.copy(this.tips[1]);
-      this.gesture = this.cand = this.lastSolid = 'none'; this.candN = 0; this.charge = 0;
+      this.gesture = this.cand = this.lastSolid = 'none'; this.candN = 0; this.charge = 0; this.lastOther = -10;
     }
+    const since = fresh ? 0 : now - this.lastSeen;
     this.active = true; this.lastSeen = now;
-    if (dt > 0) {
-      _v.subVectors(this.pos, this.prevPos).divideScalar(dt);
+    if (since > 0) {
+      _v.subVectors(this.pos, this.prevPos).divideScalar(since);
       this.vel.lerp(_v, 0.35);
     }
+    // Pointing, pinching and the peace sign all outrank a fist, and keep outranking it for a moment after
+    // they are lost, so a finger slipping out of view never turns into accidental gathering.
+    if (rawGesture === 'point' || rawGesture === 'pinch' || rawGesture === 'peace') this.lastOther = now;
+    else if (rawGesture === 'fist' && now - this.lastOther < T.fistDelay) rawGesture = 'none';
     if (rawGesture === this.cand) this.candN++; else { this.cand = rawGesture; this.candN = 1; }
     this.prevGesture = this.gesture;
-    if (this.candN >= T.holdFrames) this.gesture = this.cand;
+    if (this.candN >= (this.cand === 'fist' ? T.fistHoldFrames : T.holdFrames)) this.gesture = this.cand;
   }
 
   drawSkeleton() {
@@ -560,8 +592,10 @@ class Hand {
 
   release() {
     if (this.galaxy) {
-      this.galaxy.held = false; this.galaxy.growing = false;
-      this.galaxy.vel.copy(this.vel).multiplyScalar(0.35).clampLength(0, 5);
+      this.galaxy.held = false; this.galaxy.growing = false; this.galaxy.holder = null;
+      // it stays where you put it unless you actually throw it
+      if (this.vel.length() > T.grabFling) this.galaxy.vel.copy(this.vel).multiplyScalar(0.25).clampLength(0, 3);
+      else this.galaxy.vel.set(0, 0, 0);
       this.galaxy = null;
     }
   }
@@ -594,7 +628,7 @@ class Hand {
       pickColor(0.8); // hot core
       spawn(p.x + rnd(0.05), p.y + rnd(0.05), p.z, 0, 0, 0, cr * 0.4, cg * 0.4, cb * 0.4, 0.2, 0.3 + 0.6 * this.charge);
     } else if (g === 'pinch') {
-      if (!this.galaxy) this.galaxy = grabGalaxy(this.pinchPt) || acquireGalaxy(this.pinchPt);
+      if (!this.galaxy) this.galaxy = pinchGalaxy(this.pinchPt, this, now);
       if (this.galaxy) {
         this.galaxy.points.position.lerp(this.pinchPt, Math.min(1, dt * (this.galaxy.growing ? 14 : 7)));
         const q = this.pinchPt, r = this.galaxy.points.scale.x; // nearby stars fall into orbit
@@ -691,12 +725,24 @@ function trackCamera(now, dt) {
   const res = landmarker.detectForVideo(video, performance.now());
   const sides = res.handedness || res.handednesses || [];
   const aspect = video.videoWidth / video.videoHeight || 16 / 9;
-  const used = new Set();
-  (res.landmarks || []).forEach((lm, i) => {
-    let key = sides[i]?.[0]?.categoryName === 'Left' ? 'Left' : 'Right';
-    if (used.has(key)) key = key === 'Left' ? 'Right' : 'Left';
-    if (used.has(key)) return;
-    used.add(key);
+  const dets = (res.landmarks || []).map((lm, i) => {
+    let x = 0, y = 0;
+    for (const k of [0, 5, 9, 13, 17]) { x += lm[k].x; y += lm[k].y; }
+    return { lm, label: sides[i]?.[0]?.categoryName === 'Left' ? 'Left' : 'Right',
+      x: (0.5 - x / 5) * viewW * 1.1, y: (0.5 - y / 5) * viewH * 1.1, key: null };
+  });
+  const taken = {}, pairs = [];
+  dets.forEach((d, i) => { for (const k of ['Left', 'Right']) if (hands[k].active) pairs.push({ i, k, dist: Math.hypot(hands[k].pos.x - d.x, hands[k].pos.y - d.y) }); });
+  pairs.sort((a, b) => a.dist - b.dist);
+  for (const p of pairs) if (p.dist < 4 && !dets[p.i].key && !taken[p.k]) { dets[p.i].key = p.k; taken[p.k] = true; }
+  for (const d of dets) {
+    if (d.key) continue;
+    let k = d.label;
+    if (taken[k]) k = k === 'Left' ? 'Right' : 'Left';
+    if (!taken[k]) { d.key = k; taken[k] = true; }
+  }
+  dets.forEach(({ lm, key }) => {
+    if (!key) return;
     const h = hands[key], fresh = !h.active;
     h.hasJoints = true;
     for (let k = 0; k < 21; k++) { // mirror x so it behaves like a mirror
@@ -752,7 +798,7 @@ if (document.fullscreenEnabled) {
 setPalette(0);
 
 // ---------------------------------------------------------------- main loop
-let last = performance.now() / 1000, idleT = 0;
+let last = performance.now() / 1000, idleT = 0, nextMeteor = 4, meteor = null;
 function frame() {
   requestAnimationFrame(frame);
   const now = performance.now() / 1000, dt = Math.min(0.05, now - last);
@@ -760,9 +806,24 @@ function frame() {
   wells.length = 0;
 
   if (mode === 'camera') trackCamera(now, dt);
-  else { // attract mode behind the intro screen
+  else { // behind the intro: two slow eddies drifting through the stars, and now and then a shooting star
+    wells.push({ x: Math.sin(now * 0.11) * viewW * 0.3, y: Math.cos(now * 0.15) * viewH * 0.25, z: 0, g: 0.5, r0: 3, swirl: 2.2, range: 7, flat: 0 });
+    wells.push({ x: Math.cos(now * 0.09) * viewW * 0.32, y: Math.sin(now * 0.13) * viewH * 0.28, z: 0, g: 0.5, r0: 3, swirl: -1.8, range: 6, flat: 0 });
     idleT += dt;
-    if (idleT > 2.6) { idleT = 0; _v.set(rnd(viewW * 0.4), rnd(viewH * 0.35), -2); burst(_v, 0.1 + Math.random() * 0.25, new THREE.Vector3()); setPalette(paletteIndex + 1); }
+    if (!meteor && idleT > nextMeteor) {
+      idleT = 0; nextMeteor = rand(5, 11);
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      meteor = { x: -dir * rand(0.1, 0.45) * viewW, y: rand(0.1, 0.45) * viewH, z: rand(-4, -1), vx: dir * rand(7, 11), vy: -rand(2, 4), life: rand(0.7, 1.1) };
+    }
+    if (meteor) {
+      for (let k = 0; k < 6; k++) {
+        const f = k / 6 * dt;
+        spawn(meteor.x - meteor.vx * f, meteor.y - meteor.vy * f, meteor.z, rnd(0.08), rnd(0.08), 0,
+          0.4, 0.48, 0.62, 0.35 + Math.random() * 0.5, 0.03 + Math.random() * 0.04);
+      }
+      meteor.x += meteor.vx * dt; meteor.y += meteor.vy * dt;
+      if ((meteor.life -= dt) <= 0) meteor = null;
+    }
   }
 
   const L = hands.Left, R = hands.Right;
@@ -777,8 +838,11 @@ function frame() {
   updateParticles(dt);
   updateAmbient(dt);
 
-  for (const g in chips) chips[g].classList.toggle('active',
-    g === 'portal' ? portalActive : !portalActive && ((L.active && L.gesture === g) || (R.active && R.gesture === g)));
+  for (const g in chips) {
+    const names = g.split(' ');
+    chips[g].classList.toggle('active', g === 'portal' ? portalActive
+      : !portalActive && ((L.active && names.includes(L.gesture)) || (R.active && names.includes(R.gesture))));
+  }
 
   // gentle parallax toward the hands
   let tx = 0, ty = 0, n = 0;
