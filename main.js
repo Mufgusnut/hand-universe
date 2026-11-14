@@ -412,7 +412,7 @@ class Hand {
     scene.add(this.lines, this.dots);
   }
 
-  // Feed a new pose. joints: array of 21 world Vector3 or null (mouse mode).
+  // Feed a new pose (position, tips and joints are already set by the tracker).
   setPose(now, dt, rawGesture, fresh) {
     if (fresh) {
       this.prevPos.copy(this.pos); this.vel.set(0, 0, 0); this.prevTip.copy(this.tips[1]);
@@ -578,46 +578,6 @@ function trackCamera(now, dt) {
   });
 }
 
-// ---------------------------------------------------------------- mouse fallback
-const mouse = { x: 0, y: 0, down: false, right: false, shift: false, portal: false, sep: 2.4, openUntil: 0, peaceUntil: 0 };
-function trackMouse(now, dt) {
-  const gesture = (mouse.right || mouse.shift) ? 'pinch' : mouse.down ? 'fist'
-    : now < mouse.peaceUntil ? 'peace' : (mouse.portal || now < mouse.openUntil) ? 'open' : 'point';
-  const list = mouse.portal ? [['Left', -mouse.sep], ['Right', mouse.sep]] : [['Right', 0]];
-  for (const [key, off] of list) {
-    const h = hands[key], fresh = !h.active;
-    h.hasJoints = false;
-    h.prevPos.copy(h.pos);
-    h.pos.set(mouse.x + off, mouse.y, 0);
-    h.tips.forEach((t, k) => {
-      const a = Math.PI * (0.85 - k * 0.175);
-      t.set(h.pos.x + Math.cos(a) * 0.9, h.pos.y + Math.sin(a) * 0.9, 0);
-    });
-    if (gesture === 'point') h.tips[1].copy(h.pos);
-    h.pinchPt.copy(h.pos);
-    h.setPose(now, dt, gesture, fresh);
-    h.candN = Math.max(h.candN, T.holdFrames); h.gesture = gesture; // no debounce needed
-  }
-}
-function bindMouse() {
-  const toWorld = e => { mouse.x = (e.clientX / innerWidth - 0.5) * viewW; mouse.y = (0.5 - e.clientY / innerHeight) * viewH; };
-  window.addEventListener('pointermove', toWorld);
-  window.addEventListener('pointerdown', e => { toWorld(e); if (e.button === 2) mouse.right = true; else mouse.down = true; });
-  window.addEventListener('pointerup', e => {
-    if (e.button === 2) mouse.right = false;
-    else { mouse.down = false; mouse.openUntil = performance.now() / 1000 + 1.2; }
-  });
-  window.addEventListener('contextmenu', e => e.preventDefault());
-  window.addEventListener('wheel', e => { mouse.sep = THREE.MathUtils.clamp(mouse.sep - e.deltaY * 0.002, 0.8, 5); });
-  window.addEventListener('keydown', e => {
-    if (e.key === 'Shift') mouse.shift = true;
-    if (e.key === 'p' || e.key === 'P') mouse.portal = !mouse.portal;
-    if (e.key === ' ') mouse.peaceUntil = performance.now() / 1000 + 0.3;
-  });
-  window.addEventListener('keyup', e => { if (e.key === 'Shift') mouse.shift = false; });
-  hintEl.textContent = 'Mouse mode — move: draw · hold click: gather, release: supernova · right-click or Shift: galaxy · P: portal (wheel resizes) · Space: colors';
-}
-
 // ---------------------------------------------------------------- UI
 const introEl = document.getElementById('intro'), statusEl = document.getElementById('status');
 const hudEl = document.getElementById('hud'), hintEl = document.getElementById('hint'), paletteEl = document.getElementById('palette');
@@ -631,13 +591,12 @@ document.getElementById('startCam').addEventListener('click', async e => {
   catch (err) {
     console.error(err);
     const denied = err?.name === 'NotAllowedError', none = err?.name === 'NotFoundError';
-    setStatus(denied ? 'Camera permission was denied. Allow it in the address bar, or try mouse mode.'
-      : none ? 'No camera found. Try mouse mode instead.'
+    setStatus(denied ? 'Camera permission was denied. Allow it from the icon in the address bar, then try again.'
+      : none ? 'No camera found. Handiverse needs a webcam to see your hands.'
       : `Could not start hand tracking: ${err?.message || err}`, true);
     e.currentTarget.disabled = false;
   }
 });
-document.getElementById('startMouse').addEventListener('click', () => { mode = 'mouse'; bindMouse(); enter(); });
 window.addEventListener('keydown', e => { if ((e.key === 'v' || e.key === 'V') && mode === 'camera') video.classList.toggle('on'); });
 setPalette(0);
 
@@ -650,7 +609,6 @@ function frame() {
   wells.length = 0;
 
   if (mode === 'camera') trackCamera(now, dt);
-  else if (mode === 'mouse') trackMouse(now, dt);
   else { // attract mode behind the intro screen
     idleT += dt;
     if (idleT > 2.6) { idleT = 0; _v.set(rnd(viewW * 0.4), rnd(viewH * 0.35), -2); burst(_v, 0.1 + Math.random() * 0.25, new THREE.Vector3()); setPalette(paletteIndex + 1); }
@@ -658,8 +616,7 @@ function frame() {
 
   const L = hands.Left, R = hands.Right;
   for (const h of [L, R]) {
-    const stale = mode === 'mouse' ? (h === L && !mouse.portal) : now - h.lastSeen > 0.35;
-    if (h.active && stale) h.deactivate();
+    if (h.active && now - h.lastSeen > 0.35) h.deactivate();
   }
   const portalActive = L.active && R.active && L.gesture === 'open' && R.gesture === 'open';
   for (const h of [L, R]) { if (h.active) h.act(now, dt, portalActive); h.drawSkeleton(); }
@@ -684,4 +641,4 @@ function frame() {
 }
 frame();
 
-window.__universe = { hands, burst, setPalette, mouse, get mode() { return mode; } };
+window.__universe = { hands, burst, setPalette, get mode() { return mode; } };

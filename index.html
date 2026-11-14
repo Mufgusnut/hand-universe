@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hand Universe — CuzBro Observatory</title>
+<title>Handiverse — CuzBro Observatory</title>
 <meta name="description" content="Control a universe of stars with your bare hands. A webcam experiment from CuzBro Observatory.">
-<meta property="og:title" content="Hand Universe — CuzBro Observatory">
+<meta property="og:title" content="Handiverse — CuzBro Observatory">
 <meta property="og:description" content="Control a universe of stars with your bare hands.">
 <link rel="icon" type="image/png" href="favicon.png">
 <style>
@@ -35,8 +35,6 @@
     background: rgba(74,168,255,.14); transition: all .25s; }
   button:hover { background: rgba(74,168,255,.3); box-shadow: 0 0 34px rgba(74,168,255,.45); }
   button:disabled { opacity: .5; cursor: progress; }
-  button.ghost { border-color: var(--line); background: transparent; color: var(--dim); }
-  button.ghost:hover { color: var(--ink); background: rgba(255,255,255,.07); box-shadow: none; }
   #status { margin-top: 16px; min-height: 20px; color: var(--blue); font-size: 13px; letter-spacing: .06em; }
   #status.err { color: #ff9a8a; }
   .privacy { color: #5d668a; font-size: 12px; margin: 6px 0 0; letter-spacing: .03em; }
@@ -97,11 +95,10 @@
 <div id="intro">
   <div>
     <p class="eyebrow">CuzBro Observatory presents</p>
-    <h1>HAND UNIVERSE</h1>
-    <p class="tagline">We spend our nights photographing the sky. This is the one place you get to reach in and rearrange it. Step back, raise your hands, and take the stars for a spin.</p>
+    <h1>HANDIVERSE</h1>
+    <p class="tagline">Step back, raise your hands, and take the stars for a spin.</p>
     <div class="btns">
-      <button id="startCam">Enable camera</button>
-      <button id="startMouse" class="ghost">Try with mouse</button>
+      <button id="startCam">Enable camera &amp; begin</button>
     </div>
     <div id="status"></div>
     <p class="privacy">Your camera feed is processed in this tab and never leaves your device.</p>
