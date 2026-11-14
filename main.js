@@ -25,6 +25,10 @@ const T = {
   fistHoldFrames: 4,   // a fist must persist this many frames before it starts gathering
   minCharge: 0.1,      // how much a fist must have gathered (0-1) before opening it makes a supernova
   openWindow: 0.5,     // seconds a gathered charge is kept while the fist turns into an open hand
+  galaxyMin: 0.12,     // radius of a galaxy at the instant it is pinched into being
+  galaxyMax: 3.2,      // radius it reaches if the pinch is held the full time
+  galaxyGrowTime: 6,   // seconds of holding to go from min to max
+  tiltDepth: 2.5,      // how strongly tipping the hand toward/away from the camera tilts a held galaxy
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -410,13 +414,14 @@ function updateGalaxies(dt) {
       g.vel.multiplyScalar(Math.exp(-0.6 * dt));
       if (g.age > GALAXY_LIFE) { killGalaxy(g); continue; }
     }
-    g.radius = 0.25 + (g.maxScale - 0.25) * (1 - Math.exp(-g.grow / g.growTime));
+    const t = Math.min(1, g.grow / T.galaxyGrowTime);
+    g.radius = T.galaxyMin + (T.galaxyMax - T.galaxyMin) * (1 - (1 - t) * (1 - t)); // quick at first, easing into the maximum
     const scale = g.radius * Math.max(0.02, 1 - g.swallow);
     g.points.scale.setScalar(scale);
     g.mat.uniforms.uSize.value = 0.2 + scale * 0.62;
     g.mat.uniforms.uTime.value += dt * (g.held && g.growing ? 2.2 : 1) * (1 + g.swallow * 7);
     const fadeIn = Math.min(1, g.grow * 3), fadeOut = g.held ? 1 : Math.min(1, (GALAXY_LIFE - g.age) / 3);
-    const density = Math.min(1, 0.12 + 0.24 * scale * scale); // same star count in less area would burn out
+    const density = Math.min(1, 0.2 + 0.22 * scale * scale); // same star count in less area would burn out
     g.mat.uniforms.uAlpha.value = fadeIn * fadeOut * density * (g.held && !g.growing ? 1.3 : 1);
   }
 }
@@ -541,6 +546,7 @@ class Hand {
     this.pos = new THREE.Vector3(); this.prevPos = new THREE.Vector3(); this.vel = new THREE.Vector3();
     this.tips = Array.from({ length: 5 }, () => new THREE.Vector3());
     this.pinchPt = new THREE.Vector3(); this.prevTip = new THREE.Vector3();
+    this.quat = new THREE.Quaternion(); this.hasQuat = false; this.grabInv = null; this.grabQ = new THREE.Quaternion();
     this.gesture = 'none'; this.cand = 'none'; this.candN = 0; this.lastSolid = 'none';
     this.charge = 0; this.lastBurst = -10; this.lastPeace = -10; this.galaxy = null;
 
@@ -602,7 +608,21 @@ class Hand {
     }
   }
 
-  deactivate() { this.release(); this.active = false; this.gesture = 'none'; this.charge = 0; }
+  deactivate() { this.release(); this.active = false; this.gesture = 'none'; this.charge = 0; this.hasQuat = false; }
+
+  // Orientation of the palm, from the knuckle line (index to pinky) and the wrist-to-middle-knuckle line.
+  updateOrientation(fresh) {
+    const j = this.joints;
+    _ax.subVectors(j[5], j[17]); _ay.subVectors(j[9], j[0]);
+    _ax.z *= T.tiltDepth; _ay.z *= T.tiltDepth;
+    if (_ax.lengthSq() < 1e-6 || _ay.lengthSq() < 1e-6) return;
+    _ax.normalize(); _az.crossVectors(_ax, _ay);
+    if (_az.lengthSq() < 1e-6) return;
+    _az.normalize(); _ay.crossVectors(_az, _ax);
+    _q.setFromRotationMatrix(_m.makeBasis(_ax, _ay, _az));
+    if (fresh || !this.hasQuat) this.quat.copy(_q); else this.quat.slerp(_q, 0.3);
+    this.hasQuat = true;
+  }
 
   act(now, dt, portalActive) {
     const g = this.gesture, p = this.pos;
@@ -631,9 +651,17 @@ class Hand {
       pickColor(0.8); // hot core
       spawn(p.x + rnd(0.05), p.y + rnd(0.05), p.z, 0, 0, 0, cr * 0.4, cg * 0.4, cb * 0.4, 0.2, 0.3 + 0.6 * this.charge);
     } else if (g === 'pinch') {
-      if (!this.galaxy) this.galaxy = pinchGalaxy(this.pinchPt, this, now);
+      if (!this.galaxy) {
+        this.galaxy = pinchGalaxy(this.pinchPt, this, now);
+        this.grabInv = null; // remember how the hand and the galaxy were angled when the pinch began
+        if (this.galaxy && this.hasQuat) { this.grabInv = this.quat.clone().invert(); this.grabQ.copy(this.galaxy.points.quaternion); }
+      }
       if (this.galaxy) {
         this.galaxy.points.position.lerp(this.pinchPt, Math.min(1, dt * (this.galaxy.growing ? 14 : 7)));
+        if (this.grabInv && this.hasQuat) { // the galaxy turns with the hand from then on
+          _q.copy(this.quat).multiply(this.grabInv).multiply(this.grabQ);
+          this.galaxy.points.quaternion.slerp(_q, Math.min(1, dt * 10));
+        }
         const q = this.pinchPt, r = this.galaxy.points.scale.x; // nearby stars fall into orbit
         wells.push({ x: q.x, y: q.y, z: q.z, g: 6, r0: r * 0.9, swirl: 5, range: 2 + r * 1.5 });
       }
@@ -656,7 +684,8 @@ class Hand {
     this.prevTip.copy(this.tips[1]);
   }
 }
-const _v = new THREE.Vector3();
+const _v = new THREE.Vector3(), _ax = new THREE.Vector3(), _ay = new THREE.Vector3(), _az = new THREE.Vector3();
+const _q = new THREE.Quaternion(), _m = new THREE.Matrix4();
 const rnd = s => (Math.random() - 0.5) * 2 * s;
 const hands = { Left: new Hand(), Right: new Hand() };
 
@@ -757,6 +786,7 @@ function trackCamera(now, dt) {
     for (const k of [0, 5, 9, 13, 17]) h.pos.add(h.joints[k]);
     h.pos.multiplyScalar(0.2);
     TIP_IDS.forEach((id, k) => h.tips[k].copy(h.joints[id]));
+    h.updateOrientation(fresh);
     h.pinchPt.lerpVectors(h.joints[4], h.joints[8], 0.5);
     h.setPose(now, dt, classify(lm, aspect, h.gesture), fresh);
   });
