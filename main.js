@@ -33,6 +33,8 @@ const T = {
   nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
+  climateHold: 1.0,    // seconds a pointing finger must rest on a planet before the climate there changes
+  climateStep: 1.5,    // ...and how long each climate lasts before it moves on to the next, if the finger stays
   zoomInStart: 9,      // two open hands must come at least this close together (world units) before sweeping apart dives in
   zoomPull: 2.2,       // ...and how much further apart they must then sweep to commit to the dive
   zoomOutMin: 6,       // two open hands must have been at least this far apart for sweeping them together to zoom out
@@ -905,8 +907,9 @@ function updateBodies(dt, now) {
 // The fourth level: one planet, close up, as a globe you can reshape. A rocky or ocean world has real
 // terrain: a height map wrapped round the sphere, built from the planet's seed and then edited by hand.
 // Gas and ice giants have no ground, so they get weather instead: bands, winds and storms.
-const MAP_W = 256, MAP_H = 128, MAP_N = MAP_W * MAP_H;
+const MAP_W = 512, MAP_H = 256, MAP_N = MAP_W * MAP_H;
 const mapH = new Float32Array(MAP_N), mapBase = new Float32Array(MAP_N), mapR = new Float32Array(MAP_N); // height now, height as generated, rivers
+const mapT = new Float32Array(MAP_N), mapM = new Float32Array(MAP_N); // climate: how much warmer and how much wetter than the place would naturally be
 const mapHalf = new Uint16Array(MAP_N * 4);
 const mapTex = new THREE.DataTexture(mapHalf, MAP_W, MAP_H, THREE.RGBAFormat, THREE.HalfFloatType);
 mapTex.wrapS = THREE.RepeatWrapping; mapTex.wrapT = THREE.ClampToEdgeWrapping;
@@ -961,6 +964,7 @@ function syncMap(all) { // copy edited rows into the texture
   if (dirtyHi < dirtyLo) return;
   for (let k = dirtyLo * MAP_W, e = (dirtyHi + 1) * MAP_W; k < e; k++) {
     mapHalf[k * 4] = THREE.DataUtils.toHalfFloat(mapH[k]); mapHalf[k * 4 + 1] = THREE.DataUtils.toHalfFloat(mapR[k]);
+    mapHalf[k * 4 + 2] = THREE.DataUtils.toHalfFloat(mapT[k]); mapHalf[k * 4 + 3] = THREE.DataUtils.toHalfFloat(mapM[k]);
   }
   mapTex.needsUpdate = true; dirtyLo = MAP_H; dirtyHi = -1;
 }
@@ -1012,24 +1016,51 @@ function unpack(b64, n, put) {
   for (let c = 0, i = 0; c + 1 < s.length && i < n; c += 2) for (let run = s.charCodeAt(c), v = s.charCodeAt(c + 1); run > 0 && i < n; run--, i++) put(i, v);
 }
 let terrainOf = null, terrainDirty = false, seaDefault = 0;
+const sbyte = (v, k) => (Math.max(-127, Math.min(127, Math.round(v * k))) + 256) & 255, unsbyte = v => (v > 127 ? v - 256 : v);
+const CW = MAP_W / 4, CH = MAP_H / 4;
+function coarse(b64, out, k) { // unpack a quarter-resolution layer and smooth it back up to full size
+  if (!b64) return;
+  const tmp = new Float32Array(CW * CH);
+  unpack(b64, CW * CH, (i, v) => { tmp[i] = unsbyte(v) / k; });
+  for (let j = 0, n = 0; j < MAP_H; j++) {
+    const y = Math.max(0, Math.min(CH - 1, (j - 1.5) / 4)), y0 = Math.floor(y), y1 = Math.min(CH - 1, y0 + 1), fy = y - y0;
+    for (let i = 0; i < MAP_W; i++, n++) {
+      const x = ((i - 1.5) / 4 + CW) % CW, x0 = Math.floor(x), x1 = (x0 + 1) % CW, fx = x - x0;
+      const a = tmp[y0 * CW + x0] + (tmp[y0 * CW + x1] - tmp[y0 * CW + x0]) * fx, b = tmp[y1 * CW + x0] + (tmp[y1 * CW + x1] - tmp[y1 * CW + x0]) * fx;
+      out[n] = a + (b - a) * fy;
+    }
+  }
+}
 function storeTerrain() {
   if (!terrainOf || !terrainDirty) return;
   terrainDirty = false;
   if (!isSolid(terrainOf)) return;
-  const h = pack(MAP_N, i => (Math.max(-127, Math.min(127, Math.round((mapH[i] - mapBase[i]) * 80))) + 256) & 255), r = pack(MAP_N, i => Math.round(mapR[i] * 15));
-  terrainOf.map = h || r ? { h, r } : null;
+  const h = pack(MAP_N, i => sbyte(mapH[i] - mapBase[i], 80)), r = pack(MAP_N, i => Math.round(mapR[i] * 15));
+  // climate changes are broad and soft, so they are kept at a quarter of the resolution each way
+  const q = i => ((((i / CW) | 0) * 4 + 2) * MAP_W) + (i % CW) * 4 + 2;
+  const t = pack(CW * CH, i => sbyte(mapT[q(i)], 60)), m = pack(CW * CH, i => sbyte(mapM[q(i)], 100));
+  terrainOf.map = h || r || t || m ? { v: 2, h, r, t, m } : null;
 }
 function loadTerrain(p) {
   storeTerrain();
   terrainOf = p; terrainDirty = false;
   if (!isSolid(p)) return;
-  rng = Math.random;
   seaDefault = generateTerrain(p, mapBase);
   dirtyLo = MAP_H; dirtyHi = -1;
-  mapH.set(mapBase); mapR.fill(0);
+  mapH.set(mapBase); mapR.fill(0); mapT.fill(0); mapM.fill(0);
   if (p.map) try {
-    if (p.map.h) unpack(p.map.h, MAP_N, (i, v) => { mapH[i] = clampH(mapBase[i] + (v > 127 ? v - 256 : v) / 80); });
-    if (p.map.r) unpack(p.map.r, MAP_N, (i, v) => { mapR[i] = v / 15; });
+    // the first version of these maps was half as fine each way: spread each of its texels over four
+    const old = p.map.v !== 2, n = old ? MAP_N / 4 : MAP_N;
+    const each = (b64, put) => {
+      if (!b64) return;
+      if (!old) return unpack(b64, n, put);
+      const tmp = new Uint8Array(n);
+      unpack(b64, n, (i, v) => { tmp[i] = v; });
+      for (let j = 0, k = 0; j < MAP_H; j++) for (let i = 0; i < MAP_W; i++, k++) put(k, tmp[(j >> 1) * (MAP_W / 2) + (i >> 1)]);
+    };
+    each(p.map.h, (i, v) => { mapH[i] = clampH(mapBase[i] + unsbyte(v) / 80); });
+    each(p.map.r, (i, v) => { mapR[i] = v / 15; });
+    coarse(p.map.t, mapT, 60); coarse(p.map.m, mapM, 100);
   } catch (err) { console.warn('Could not restore this planet\'s terrain:', err); }
   syncMap(true);
 }
@@ -1045,15 +1076,15 @@ const NOISE3_GLSL = /* glsl */`
 const col3 = (r, g, b) => ({ value: new THREE.Color().setRGB(r, g, b) });
 const globeMat = new THREE.ShaderMaterial({
   uniforms: { uMap: { value: mapTex }, uRot: { value: new THREE.Matrix3() }, uLight: { value: new THREE.Vector3(0, 0, 1) },
-    uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 }, uKind: { value: 0 }, uSea: { value: 0 }, uBase: { value: -1.5 }, uSnow: { value: 0.55 }, uPolar: { value: 0.5 },
+    uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 }, uKind: { value: 0 }, uSea: { value: 0 }, uBase: { value: -1.5 }, uTemp: { value: 0 }, uLife: { value: 0 },
     uCloud: { value: 0 }, uRing: { value: 0 }, uTilt: { value: 0 }, uBands: { value: 9 }, uWind: { value: 1 },
-    uDeep: col3(0, 0, 0), uShallow: col3(0, 0, 0), uSand: col3(0, 0, 0), uLow: col3(0, 0, 0), uHigh: col3(0, 0, 0), uPeak: col3(1, 1, 1), uAtm: col3(0, 0, 0),
+    uDeep: col3(0, 0, 0), uShallow: col3(0, 0, 0), uSand: col3(0, 0, 0), uLow: col3(0, 0, 0), uForest: col3(0, 0, 0), uHigh: col3(0, 0, 0), uPeak: col3(1, 1, 1), uAtm: col3(0, 0, 0),
     uSpots: { value: Array.from({ length: SPOT_MAX }, () => new THREE.Vector4()) } },
   vertexShader: QUAD_VERT,
   fragmentShader: /* glsl */`
     varying vec2 vUv;
-    uniform sampler2D uMap; uniform mat3 uRot; uniform vec3 uLight, uDeep, uShallow, uSand, uLow, uHigh, uPeak, uAtm;
-    uniform float uTime, uSeed, uAlpha, uKind, uSea, uBase, uSnow, uPolar, uCloud, uRing, uTilt, uBands, uWind;
+    uniform sampler2D uMap; uniform mat3 uRot; uniform vec3 uLight, uDeep, uShallow, uSand, uLow, uForest, uHigh, uPeak, uAtm;
+    uniform float uTime, uSeed, uAlpha, uKind, uSea, uBase, uTemp, uLife, uCloud, uRing, uTilt, uBands, uWind;
     uniform vec4 uSpots[${SPOT_MAX}];
     ${NOISE3_GLSL}
     void main(){
@@ -1063,31 +1094,46 @@ const globeMat = new THREE.ShaderMaterial({
       vec2 q = p / R; float z = sqrt(max(0.0, 1.0 - dot(q, q)));
       vec3 m = uRot * vec3(q, z), Lp = uRot * uLight;          // this point, and the sun, in the planet's own frame
       float lat = asin(clamp(m.y, -1.0, 1.0)), lon = atan(m.x, m.z);
-      vec3 col, N = m; float spec = 0.0;
+      vec3 col, N = m; float spec = 0.0, lights = 0.0;
       if (uKind < 0.5) {
         vec2 uv = vec2(lon / 6.2831853 + 0.5, lat / 3.14159265 + 0.5);
         vec4 t = texture2D(uMap, uv);
         const float ex = 1.0 / ${MAP_W}.0, ey = 1.0 / ${MAP_H}.0;
         float gE = (texture2D(uMap, uv + vec2(ex, 0.0)).r - texture2D(uMap, uv - vec2(ex, 0.0)).r) / (2.0 * ex * 6.2831853 * max(0.12, cos(lat)));
         float gN = (texture2D(uMap, uv + vec2(0.0, ey)).r - texture2D(uMap, uv - vec2(0.0, ey)).r) / (2.0 * ey * 3.14159265);
-        float fine = fbm3(m * 22.0 + uSeed);
-        float h = t.r + (fine - 0.5) * 0.06, depth = uSea - h;
+        float fine = fbm3(m * 22.0 + uSeed), grit = noise3(m * 95.0 + uSeed);
+        float h = t.r + (fine - 0.5) * 0.06 + (grit - 0.5) * 0.014, depth = uSea - h;
         float ground = max(uSea, uBase);                          // heights are judged from the sea, or on a dry world from its plains
+        float el = max(0.0, h - ground);
+        // Climate: warm at the equator, cold at the poles and on the heights; damp here, dry there. Both can
+        // be pushed either way by hand (the map's third and fourth channels).
+        float warm = 1.0 - abs(lat) / 1.35 + uTemp + t.b + (fine - 0.5) * 0.18;
+        float damp = clamp(fbm3(m * 2.6 + uSeed + 11.0) * 1.3 - 0.15 + t.a * 0.7, 0.0, 1.0);
+        float frost;
         bool wet = depth > 0.0 || t.g > 0.5;
         if (wet) {                                                // sea, lake or river
           col = mix(uShallow, uDeep, smoothstep(0.0, 0.3, depth));
+          col = mix(col, vec3(0.6, 0.72, 0.78), smoothstep(0.014, 0.0, depth) * step(0.0, depth) * 0.4);   // surf along the shore
           spec = pow(max(0.0, dot(m, normalize(Lp + uRot * vec3(0.0, 0.0, 1.0)))), 220.0) * 0.45;
-        } else {                                                  // shore, lowland, highland
-          float el = h - ground;
-          col = mix(uSand, uLow, smoothstep(0.0, 0.035, el + (uSea < uBase ? 0.25 : 0.0)));
-          col = mix(col, uHigh, smoothstep(0.14, 0.42, el + (fine - 0.5) * 0.1));
-          col *= 0.85 + 0.3 * fine;
+          float cold = smoothstep(0.22, -0.06, warm);             // open water, then drifting icebergs, then solid pack ice
+          frost = smoothstep(0.7 - cold * 0.75, 0.74 - cold * 0.75, noise3(m * 48.0 + uSeed) * 0.6 + grit * 0.4) * step(0.001, cold);
+        } else {
+          float air = warm - el * 0.9;                            // colder the higher you climb
+          col = mix(uSand, uLow, smoothstep(0.28, 0.5, damp));    // desert, grassland, forest
+          col = mix(col, uForest, smoothstep(0.6, 0.85, damp));
+          col = mix(col, vec3(0.07, 0.22, 0.06), clamp(t.a, 0.0, 1.0) * (1.0 - uLife));   // even a dead world greens if you bring it rain
+          col = mix(col, vec3(0.3, 0.28, 0.22), smoothstep(0.3, 0.05, air) * uLife);      // tundra
+          if (uSea > uBase) col = mix(col, vec3(0.55, 0.47, 0.3), smoothstep(0.03, 0.0, el) * 0.8);   // beaches
+          col = mix(col, uHigh, smoothstep(0.16, 0.45, el + (fine - 0.5) * 0.1));          // bare rock on the heights
+          col *= 0.82 + 0.3 * fine + 0.14 * (grit - 0.5);
           vec3 east = normalize(vec3(m.z, 0.0, -m.x) + 1e-5), north = cross(m, east);
           N = normalize(m - 0.1 * (east * gE + north * gN));     // slopes catch the light
+          frost = smoothstep(0.02, -0.07, air + (grit - 0.5) * 0.1);
+          // where the living is easy, somebody has settled: lights come on after dark
+          lights = clamp(uLife + t.a, 0.0, 1.0) * step(0.2, air) * step(el, 0.3) * smoothstep(0.3, 0.5, damp) * (1.0 - frost)
+            * smoothstep(0.58, 0.72, fbm3(m * 10.0 + uSeed + 5.0)) * step(0.55, hash3(floor(m * 120.0)));
         }
-        float line = uSnow - abs(lat) * uPolar;                   // snow on the peaks, lower and lower toward the poles
-        float ice = smoothstep(line, line + 0.07, (wet ? -0.05 : h - ground) + (fine - 0.5) * 0.12);
-        col = mix(col, uPeak, ice); spec *= 1.0 - ice;
+        col = mix(col, uPeak, frost); spec *= 1.0 - frost;
       } else {                                                    // a giant: bands of cloud sliding past each other
         float lonF = lon + uTime * 0.02 * uWind * (1.0 + 2.0 * sin(lat * uBands * 0.7 + uSeed));
         vec3 mf = vec3(sin(lonF) * cos(lat), m.y, cos(lonF) * cos(lat));
@@ -1107,7 +1153,7 @@ const globeMat = new THREE.ShaderMaterial({
         }
       }
       float sun = dot(m, Lp), day = smoothstep(-0.06, 0.16, sun);
-      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day;
+      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day + vec3(1.0, 0.75, 0.38) * lights * (1.0 - day) * 0.8;
       float ca = cos(uTime * 0.012), sa = sin(uTime * 0.012);      // weather drifting over it all
       float cloud = smoothstep(0.5, 0.72, fbm3(vec3(m.x * ca - m.z * sa, m.y, m.x * sa + m.z * ca) * 3.2 + uSeed * 1.7)) * uCloud;
       col = mix(col, vec3(0.07 + 0.93 * max(0.0, sun)), cloud);
@@ -1136,18 +1182,18 @@ globe.frustumCulled = false; globe.visible = false; globe.renderOrder = 2.7;
 scene.add(globe);
 
 const SEA_DEEP = new THREE.Color(0.01, 0.04, 0.16), SEA_SHALLOW = new THREE.Color(0.04, 0.22, 0.36), SAND = new THREE.Color(0.55, 0.47, 0.3);
-const ROCK_HIGH = new THREE.Color(0.2, 0.17, 0.15), WHITE = new THREE.Color(1, 1, 1), SKY = new THREE.Color(0.25, 0.45, 1);
+const FOREST = new THREE.Color(0.03, 0.12, 0.04), ROCK_HIGH = new THREE.Color(0.2, 0.17, 0.15), WHITE = new THREE.Color(1, 1, 1), SKY = new THREE.Color(0.25, 0.45, 1);
 function globeLook(p, u) {
   const kind = planetKind(p), c = planetLook(p).c;
   u.uKind.value = isSolid(p) ? 0 : 1; u.uSeed.value = p.seed % 100; u.uRing.value = p.rings; u.uTilt.value = ((p.seed % 7) - 3) * 0.14;
   if (kind === 'ocean') {
     u.uDeep.value.copy(c[0]).multiplyScalar(0.45); u.uShallow.value.copy(c[0]).lerp(SEA_SHALLOW, 0.5); u.uSand.value.copy(SAND);
-    u.uLow.value.copy(c[1]); u.uHigh.value.copy(ROCK_HIGH); u.uPeak.value.copy(WHITE); u.uAtm.value.copy(SKY);
-    u.uSnow.value = 0.68; u.uPolar.value = 0.6; u.uCloud.value = 0.6; u.uBase.value = SEA_MIN;
+    u.uLow.value.copy(c[1]); u.uForest.value.copy(c[1]).lerp(FOREST, 0.6); u.uHigh.value.copy(ROCK_HIGH); u.uPeak.value.copy(WHITE); u.uAtm.value.copy(SKY);
+    u.uTemp.value = 0.05; u.uLife.value = 1; u.uCloud.value = 0.6; u.uBase.value = SEA_MIN;
   } else if (kind === 'rock') { // dry to begin with, but it will hold water if you give it some
-    u.uDeep.value.copy(SEA_DEEP); u.uShallow.value.copy(SEA_SHALLOW); u.uSand.value.copy(c[0]).lerp(c[1], 0.5);
-    u.uLow.value.copy(c[0]); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]).lerp(WHITE, 0.6); u.uAtm.value.copy(c[2]).multiplyScalar(0.25);
-    u.uSnow.value = 0.95; u.uPolar.value = p.seed % 3 ? 0.62 : 0.1; u.uCloud.value = 0; u.uBase.value = -0.2;
+    u.uDeep.value.copy(SEA_DEEP); u.uShallow.value.copy(SEA_SHALLOW); u.uSand.value.copy(c[0]).lerp(c[2], 0.3);
+    u.uLow.value.copy(c[0]); u.uForest.value.copy(c[0]).multiplyScalar(0.7); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]).lerp(WHITE, 0.6); u.uAtm.value.copy(c[2]).multiplyScalar(0.25);
+    u.uTemp.value = p.seed % 3 ? -0.1 : 0.8; u.uLife.value = 0; u.uCloud.value = 0; u.uBase.value = -0.2; // most have a polar cap, some are too hot for one
   } else {
     u.uLow.value.copy(c[0]); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]); u.uAtm.value.copy(c[1]).multiplyScalar(0.6);
     u.uBands.value = kind === 'ice' ? 5 + (p.seed % 3) : 8 + (p.seed % 5); u.uCloud.value = 0; u.uWind.value = p.wind ?? 1;
@@ -1171,29 +1217,78 @@ function globePoint(x, y) {
 function touched(now) { globeBusy = now; terrainDirty = true; markDirty(); }
 function dust(x, y, n, r, g, b) { for (let i = 0; i < n; i++) spawn(x + rnd(0.1), y + rnd(0.1), 0, rnd(0.8), rnd(0.8) + 0.3, 0, r, g, b, 0.3 + Math.random() * 0.5, 0.04 + Math.random() * 0.04); }
 
-// pinch: pull mountains up out of the ground, or on a giant, wind up a storm
+const _gc = new THREE.Vector3();
+const dirOf = (lon, lat, out) => out.set(Math.sin(lon) * Math.cos(lat), Math.sin(lat), Math.cos(lon) * Math.cos(lat));
+
+// Pinch: held still it swells the land up into a dome; dragged it draws a craggy mountain range along the
+// path. On a giant it winds up a storm instead.
 function planetPinch(hand, now, dt) {
   const p = focusP, q = hand.pinchPt;
-  if (!p || now - hand.pinchAt < 0.15 || !globePoint(q.x, q.y)) return;
-  if (isSolid(p)) {
-    brush(at.lon, at.lat, 0.17, (k, d) => { const w = 1 - d * d; mapH[k] = clampH(mapH[k] + dt * 0.32 * w * w); });
-    dust(q.x, q.y, 2, 0.5, 0.45, 0.4);
-  } else {
+  if (!p || now - hand.pinchAt < 0.15 || !globePoint(q.x, q.y)) { hand.pv = null; return; }
+  touched(now);
+  if (!isSolid(p)) {
     if (!hand.spot) { hand.spot = [at.lon, at.lat, 0.03, 0]; p.spots.push(hand.spot); if (p.spots.length > SPOT_MAX) p.spots.shift(); }
     hand.spot[2] = Math.min(0.42, hand.spot[2] + dt * 0.07);
-    dust(q.x, q.y, 1, 0.6, 0.4, 0.3);
+    return dust(q.x, q.y, 1, 0.6, 0.4, 0.3);
   }
-  touched(now);
+  dirOf(at.lon, at.lat, _gc);
+  dust(q.x, q.y, 2, 0.5, 0.45, 0.4);
+  if (!hand.pv) { hand.pv = _gc.clone(); return; }
+  const ang = Math.acos(Math.min(1, hand.pv.dot(_gc)));
+  if (ang > 0.5) { hand.pv.copy(_gc); return; } // the hand jumped (tracking slipped): start afresh rather than rule a line across the world
+  if (ang < 0.012) return brush(at.lon, at.lat, 0.15, (k, d) => { const w = 1 - d * d; mapH[k] = clampH(mapH[k] + dt * 0.24 * w * w); });
+  const steps = Math.min(40, Math.ceil(ang / 0.025)), amt = 0.085 * ang / steps / 0.025, seed = p.seed | 0;
+  for (let n = 1; n <= steps; n++) {
+    _gv.copy(hand.pv).lerp(_gc, n / steps).normalize();
+    brush(Math.atan2(_gv.x, _gv.z), Math.asin(Math.max(-1, Math.min(1, _gv.y))), 0.075, (k, d) => {
+      const i = k % MAP_W, j = (k / MAP_W) | 0, w = 1 - d * d;
+      const crag = noise3(colSin[i] * rowCos[j] * 34, rowSin[j] * 34, colCos[i] * rowCos[j] * 34, seed);
+      mapH[k] = clampH(mapH[k] + amt * w * w * (0.35 + 1.5 * crag));
+    });
+  }
+  hand.pv.copy(_gc);
 }
-// point: a fingertip run across the land leaves a river behind it
-function planetDraw(hand, now) {
+// Fist pressed on the ground: the land sinks under it, and fills with water if it goes below the sea.
+// (A fist that was gathered out in space first is a meteor on its way, and is left alone.)
+function planetDig(hand, now, dt) {
+  const p = focusP;
+  if (!p || !isSolid(p) || hand.charge >= T.minCharge || !globePoint(hand.pos.x, hand.pos.y)) return false;
+  brush(at.lon, at.lat, 0.16, (k, d) => { const w = 1 - d * d; mapH[k] = clampH(mapH[k] - dt * 0.3 * w * w); });
+  dust(hand.pos.x, hand.pos.y, 2, 0.4, 0.36, 0.32);
+  touched(now);
+  return true;
+}
+// Peace sign drawn across the land leaves a river behind the fingertip.
+function planetRiver(hand, now) {
   const p = focusP, a = hand.prevTip, b = hand.tips[1];
   if (!p || !isSolid(p)) return;
   for (let s = 1; s <= 4; s++) {
     if (!globePoint(a.x + (b.x - a.x) * s / 4, a.y + (b.y - a.y) * s / 4)) continue;
-    brush(at.lon, at.lat, 0.04, (k, d) => { const w = 1 - d; mapR[k] = Math.max(mapR[k], Math.min(1, w * 2.2)); mapH[k] = clampH(mapH[k] - 0.003 * w); });
+    brush(at.lon, at.lat, 0.022, (k, d) => { const w = 1 - d; mapR[k] = Math.max(mapR[k], Math.min(1, w * 2.2)); mapH[k] = clampH(mapH[k] - 0.002 * w); });
     touched(now);
   }
+  if (globePoint(b.x, b.y)) dust(b.x, b.y, 1, 0.2, 0.45, 0.7);
+}
+// A pointing finger rested on one spot changes the climate around it, and goes on to the next kind for as
+// long as it stays: [name, warmer or colder, wetter or drier].
+const CLIMATES = [['Snow and ice', -1.3, 0.2], ['Thaw', 0.9, 0], ['Desert', 0.6, -1], ['Jungle', 0.3, 1], ['As it was', 0, 0]];
+function planetClimate(hand, now, dt) {
+  const p = focusP, tip = hand.tips[1];
+  if (!p || !isSolid(p) || !globePoint(tip.x, tip.y)) { hand.dwell = null; return false; }
+  globeBusy = now;
+  dirOf(at.lon, at.lat, _gc);
+  const d = hand.dwell;
+  if (!d || d.v.dot(_gc) < Math.cos(0.14)) { hand.dwell = { v: _gc.clone(), lon: at.lon, lat: at.lat, t: now, step: -1 }; return true; } // it moved: start again there
+  const since = now - d.t - T.climateHold;
+  pickColor(0.7);
+  spawn(tip.x + rnd(0.25), tip.y + rnd(0.25), 0, 0, 0, 0, cr, cg, cb, 0.3, 0.03 + 0.05 * Math.min(1, (now - d.t) / T.climateHold)); // gathering
+  if (since < 0) return true;
+  const n = Math.floor(since / T.climateStep);
+  if (n > d.step) { d.step = n; note(CLIMATES[n % CLIMATES.length][0], 2); }
+  const c = CLIMATES[d.step % CLIMATES.length], rate = Math.min(1, dt * 5);
+  brush(d.lon, d.lat, 0.4, (k, q) => { const w = 1 - q * q, f = w * w * rate; mapT[k] += (c[1] - mapT[k]) * f; mapM[k] += (c[2] - mapM[k]) * f; });
+  touched(now);
+  return true;
 }
 // a supernova over the planet arrives as a meteor: the harder the fist was held, the bigger the crater
 function planetImpact(pt, power, now) {
@@ -1213,10 +1308,14 @@ function planetTide(d, now) {
   else p.wind = THREE.MathUtils.clamp((p.wind ?? 1) + step * 0.3, 0, 5);
   if (step) touched(now);
 }
-function planetSpin(hand, now) {
-  if (level !== 3 || E3 < 0.9 || Math.hypot(hand.pos.x, hand.pos.y) > globeR * 1.3) return;
-  globeWx += (hand.vel.x / globeR - globeWx) * 0.25; globeWy += (hand.vel.y / globeR - globeWy) * 0.25;
+// An open hand on the planet takes hold of it. Kept steady, it holds the globe still for the other hand to
+// work on; moved, it turns the globe with it, and a flick sets it spinning.
+function planetHold(hand, now) {
+  if (level !== 3 || E3 < 0.9 || Math.hypot(hand.pos.x, hand.pos.y) > globeR * 1.2) return false;
+  const sp = hand.vel.length(), k = sp < 0.6 ? 0 : (sp - 0.6) / sp / globeR; // a hand is never perfectly still: ignore the tremble
+  globeWx += (hand.vel.x * k - globeWx) * 0.4; globeWy += (hand.vel.y * k - globeWy) * 0.4;
   globeTouched = now;
+  return true;
 }
 
 function updateGlobe(dt, now, px, py, radius, lx, ly) {
@@ -1224,7 +1323,7 @@ function updateGlobe(dt, now, px, py, radius, lx, ly) {
   if (terrainOf !== p) { loadTerrain(p); globeQ.setFromAxisAngle(AXIS_X, 0.35); globeWx = globeWy = 0; }
   if (now - globeTouched > 0.1) { const k = Math.exp(-2.5 * dt); globeWx *= k; globeWy *= k; }
   globeQ.premultiply(_gq.setFromAxisAngle(AXIS_Y, globeWx * dt)).premultiply(_gq.setFromAxisAngle(AXIS_X, -globeWy * dt));
-  if (now - globeBusy > 1.5 && now - globeTouched > 1.5) globeQ.multiply(_gq.setFromAxisAngle(AXIS_Y, dt * 0.04)); // idling: it turns on its own axis
+  if (now - globeBusy > 4 && now - globeTouched > 4) globeQ.multiply(_gq.setFromAxisAngle(AXIS_Y, dt * 0.04)); // idling: it turns on its own axis
   globeQ.normalize();
   syncMap(false);
   globeLook(p, u);
@@ -1470,7 +1569,8 @@ class Hand {
 
   act(now, dt, sculpting) {
     const g = this.gesture, p = this.pos;
-    if (g !== 'pinch') { this.release(); this.pinchAt = null; this.spot = null; } else if (this.pinchAt == null) this.pinchAt = now;
+    if (g !== 'pinch') { this.release(); this.pinchAt = null; this.spot = null; this.pv = null; } else if (this.pinchAt == null) this.pinchAt = now;
+    if (g === 'point') this.pointAt = now; else if (now - (this.pointAt ?? -10) > 0.4) this.dwell = null; // a finger that flickers out of view for a moment keeps its place
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
     if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
 
@@ -1480,8 +1580,7 @@ class Hand {
       if (this.charge >= T.minCharge) { burst(p, this.charge, this.vel); shatter(p, this.charge); this.lastBurst = now; }
       this.charge = 0;
       wells.push({ x: p.x, y: p.y, z: p.z, g: -7 });
-      planetSpin(this, now); // down on a planet, an open hand turns the globe
-      { // streamers off every fingertip
+      if (!planetHold(this, now)) { // streamers off every fingertip (but a hand holding a planet keeps it clear)
         for (const t of this.tips) for (let k = 0; k < 5; k++) {
           _v.subVectors(t, p).normalize().multiplyScalar(1.5 + Math.random() * 2.5);
           pickColor(0.2);
@@ -1489,6 +1588,8 @@ class Hand {
             cr, cg, cb, 0.6 + Math.random() * 1.2, 0.04 + Math.random() * 0.05);
         }
       }
+    } else if (g === 'fist' && level === 3 && planetDig(this, now, dt)) {
+      this.charge = 0; // pressing on the ground, not gathering a meteor
     } else if (g === 'fist') {
       this.charge = Math.min(1, this.charge + dt / 2.2); this.fistAt = now;
       // pulls the background stars (and any loose sparks) into a spinning disc around the fist
@@ -1515,8 +1616,9 @@ class Hand {
         if (this.grab?.kind === 'galaxy' && this.hasQuat) { this.grabInv = this.quat.clone().invert(); this.grabQ.copy(this.grab.quat); }
       }
       if (this.grab) holdBody(this, this.grab, dt);
+    } else if (g === 'point' && !sculpting && level === 3 && planetClimate(this, now, dt)) {
+      // resting on a planet, the finger changes the weather rather than drawing
     } else if (g === 'point' && !sculpting) {
-      if (level === 3) planetDraw(this, now);
       const tip = this.tips[1], n = 14;
       for (let k = 0; k < n; k++) { // interpolate so fast strokes stay continuous
         _v.lerpVectors(this.prevTip, tip, k / n);
@@ -1524,6 +1626,8 @@ class Hand {
         spawn(_v.x + rnd(0.04), _v.y + rnd(0.04), _v.z, rnd(0.25), rnd(0.25), rnd(0.25), cr, cg, cb,
           1.6 + Math.random() * 1.6, 0.05 + Math.random() * 0.05);
       }
+    } else if (g === 'peace' && level === 3) {
+      planetRiver(this, now);
     } else if (g === 'peace') {
       if (this.lastSolid !== 'peace' && now - this.lastPeace > 1) {
         this.lastPeace = now;
@@ -1670,20 +1774,22 @@ const LEGEND = { // one line per level: universe, galaxy, solar system, a world 
   'fist open': ['<b>Fist</b>gather, then <b class="in">open</b> for a supernova; on a galaxy it destroys it',
     '<b>Fist</b>gather, then <b class="in">open</b> on a star to blow it up',
     '<b>Fist</b>gather, then <b class="in">open</b> on a planet to smash it',
-    '<b>Fist</b>gather, then <b class="in">open</b> on the planet for a meteor strike',
+    '<b>Fist</b>on the land sinks it; gathered out in space, then <b class="in">opened</b> over it, a meteor',
     '<b>Fist</b>gather, then <b class="in">open</b> on the planet to scar its clouds'],
   pinch: ['<b>Pinch</b>hold to grow a galaxy, twist to tilt, or grab one',
     '<b>Pinch</b>hold to grow a star, or grab one',
     '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit',
-    '<b>Pinch</b>hold on the planet to raise mountains',
+    '<b>Pinch</b>hold to swell the land, drag to draw a mountain range',
     '<b>Pinch</b>hold on the planet to brew a storm'],
   zoom: ['<b>Both hands open</b>together over a galaxy, then sweep apart to dive in',
     '<b>Both hands open</b>sweep apart over a star to visit, or together to leave',
     '<b>Both hands open</b>sweep apart over a planet to land, or together to leave',
-    '<b>Open hand</b>spins the planet; sweep both hands together to leave',
-    '<b>Open hand</b>spins the planet; sweep both hands together to leave'],
+    '<b>Open hand</b>holds or turns the planet for the other hand; sweep both together to leave',
+    '<b>Open hand</b>holds or turns the planet; sweep both together to leave'],
   point: ['<b>Point</b>draw with light', '<b>Point</b>draw with light', '<b>Point</b>draw with light',
-    '<b>Point</b>draw rivers across the land', '<b>Point</b>draw with light'],
+    '<b>Point</b>rest on a spot to change its climate', '<b>Point</b>draw with light'],
+  peace: ['<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors',
+    '<b>Peace sign</b>drag across the land to draw a river', '<b>Peace sign</b>change colors'],
   nebula: ['<b>Two fingertips</b>touch, then pull apart for a nebula',
     '<b>Two fingertips</b>touch, then pull apart for a dust cloud',
     '<b>Two fingertips</b>touch on a planet, pull apart for rings, then moons',
@@ -1691,7 +1797,7 @@ const LEGEND = { // one line per level: universe, galaxy, solar system, a world 
     '<b>Two fingertips</b>spread for faster winds, close to calm them'],
 };
 const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to light a star.', 'A solar system. Pinch and hold to grow a planet.',
-  'Pinch the land to raise mountains'];
+  'One open hand holds the planet, the other shapes it'];
 function refreshChrome() {
   const row = level < 3 ? level : focusP && !isSolid(focusP) ? 4 : 3;
   for (const k in LEGEND) if (chips[k]) chips[k].innerHTML = LEGEND[k][row];
