@@ -35,9 +35,11 @@ const T = {
   nebulaMax: 10,       // ...and the widest it can be pulled
   climateHold: 1.0,    // seconds a pointing finger must rest on a planet before the climate there changes
   climateStep: 1.5,    // ...and how long each climate lasts before it moves on to the next, if the finger stays
-  zoomInStart: 9,      // two open hands must come at least this close together (world units) before sweeping apart dives in
-  zoomPull: 2.2,       // ...and how much further apart they must then sweep to commit to the dive
-  zoomOutMin: 6,       // two open hands must have been at least this far apart for sweeping them together to zoom out
+  zoomPull: 2.0,       // how far (world units) two open hands must sweep apart to dive in
+  zoomTouch: 0.5,      // two open hands count as touching when any parts of them are this close, in hand-lengths...
+  zoomCame: 2.0,       // ...provided they travelled at least this far (world units) to meet...
+  zoomRest: 0.35,      // ...and climbing out happens once they have rested together this many seconds; parting sooner is a dive
+  zoomInDelay: 1.5,    // after climbing out, sweeping apart does nothing for this many seconds
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -524,7 +526,7 @@ function updateGalaxies(dt) {
 const C0 = new THREE.Vector3(0, 0, -1), FACE = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
 const SYSTEM_ZOOM = 5;
 let level = 0, depth = 0, E1 = 0, E2 = 0, E3 = 0, focusG = null, focusS = null, focusP = null;
-let zoomNudge = 0, zoomLock = false, zoomKey = null, zoomOn = false, zoomMin = 0, zoomMax = 0, zoomGap = 0, zoomHeld = 0, zoomShow = false;
+let zoomNudge = 0, zoomLock = false, zoomKey = null, zoomOn = false, zoomMin = 0, zoomMax = 0, zoomGap = 0, zoomHeld = 0, zoomShow = false, zoomWait = 0, zoomFar = 0, zoomMeet = false, zoomRested = 0;
 let galS = 9, sysR = 4.8, gK = 1, zM = 1, zPx = 0, zPy = 0, bodyTime = 0;
 const gO = new THREE.Vector3(), _w = new THREE.Vector3();
 const ease = t => t * t * (3 - 2 * t), clamp01 = t => Math.min(1, Math.max(0, t));
@@ -583,49 +585,71 @@ function surface() {
   warp(-1);
 }
 
-// Two open hands are the zoom control, like a swimmer's breaststroke. Bring them together over a galaxy
-// or a star and sweep them apart: dive into it. Start wide and sweep them together over open space: climb
-// back out. It is the sweep that counts, not the pose, so two open hands held still do nothing at all.
-function zoomTarget(x, y, loose) {
+// Two open hands are the zoom control, and going in and coming out are deliberately different moves so that
+// one is never taken for the other. Sweep the hands apart, from wherever they are: dive into the nearest
+// thing between them. Bring them together and keep them together for a moment: climb back out.
+function zoomTarget(x, y, wide) {
   const list = level === 0 ? galaxies : level === 1 && focusG ? focusG.stars : level === 2 && focusS ? focusS.planets : null;
   let best = null, bd = Infinity;
   if (list) for (const o of list) {
     if (o.kind === 'galaxy' && !o.alive) continue;
     const d = Math.hypot(o.wx - x, o.wy - y);
-    if (d < (loose ? Math.max(3.5, o.reach * 1.6) : o.reach) && d < bd) { best = o; bd = d; }
+    if (d < (wide ? Math.max(4.5, o.reach * 2) : Math.max(2.2, o.reach * 1.3)) && d < bd) { best = o; bd = d; }
   }
   return best;
 }
+// Do the two hands meet? Measured between their nearest joints and scaled by the size of the hands, so it
+// works the same near the camera and far from it.
+function handsTouch(L, R, d) {
+  if (!L.hasJoints || !R.hasJoints) return d < 2.2;
+  const size = (Math.hypot(L.joints[9].x - L.joints[0].x, L.joints[9].y - L.joints[0].y) + Math.hypot(R.joints[9].x - R.joints[0].x, R.joints[9].y - R.joints[0].y)) / 2;
+  let best = Infinity;
+  for (const a of L.joints) for (const b of R.joints) best = Math.min(best, Math.hypot(a.x - b.x, a.y - b.y));
+  return best < size * T.zoomTouch;
+}
 function updateZoom(L, R, now, dt) {
   const fresh = Math.max(L.charge, R.charge) >= T.minCharge || now - Math.max(L.lastBurst, R.lastBurst) < 1.2; // that is a supernova, not a stroke
-  // A hand sweeping sideways is seen edge-on and stops reading as cleanly open, so one that was open a moment ago
-  // and has not become anything else still counts, and a brief dropout does not throw the stroke away.
-  const openish = h => h.active && (h.gesture === 'open' || (h.gesture === 'none' && now - h.lastOpen < 1));
-  const both = openish(L) && openish(R) && (L.gesture === 'open' || R.gesture === 'open' || zoomOn) && !fresh;
+  // A hand sweeping sideways is seen edge-on and stops reading as cleanly open, so one that was open in the
+  // last couple of seconds and has not become a fist, pinch or point still counts.
+  const openish = h => h.active && (h.gesture === 'open' || h.gesture === 'none') && now - h.lastOpen < 2;
+  const both = openish(L) && openish(R) && !fresh;
   let nudge = zoomHeld;
+  // How far apart the hands recently were, remembered through tracking dropouts and fading over a few
+  // seconds, so that hands which blur or vanish for a moment on the way together still count as having come.
+  if (L.active && R.active) zoomFar = Math.max(Math.hypot(L.pos.x - R.pos.x, L.pos.y - R.pos.y), zoomFar - dt * 1.2);
+  else zoomFar = Math.max(0, zoomFar - dt * 1.2);
+  // A dive or a climb finishes by itself: once the view has settled the hands can go straight into the next
+  // one, measured afresh from wherever they now are, without having to be dropped first.
+  if (zoomLock && Math.abs(depth - level) < 0.04) { zoomLock = false; zoomOn = false; }
   if (!both) {
-    if (!zoomOn || fresh || (zoomGap += dt) > 0.4) { zoomOn = false; zoomKey = null; nudge = 0; if (Math.abs(depth - level) < 0.04) zoomLock = false; }
+    if (!zoomOn || fresh || (zoomGap += dt) > 0.6) { zoomOn = false; zoomKey = null; nudge = 0; } // a brief dropout does not throw the stroke away
   } else if (!zoomLock) {
     zoomGap = 0; nudge = 0;
     const d = Math.hypot(L.pos.x - R.pos.x, L.pos.y - R.pos.y), mx = (L.pos.x + R.pos.x) / 2, my = (L.pos.y + R.pos.y) / 2;
     if (!zoomOn) { zoomOn = true; zoomMin = zoomMax = d; zoomKey = null; }
     zoomMax = Math.max(zoomMax, d);
-    // the stroke outward is measured from where the hands were closest, and aims at whatever lay between them then
-    if (d <= zoomMin) { zoomMin = d; zoomKey = null; }
-    if (!zoomKey && zoomMin < T.zoomInStart && d - zoomMin < T.zoomPull * 0.6) zoomKey = zoomTarget(mx, my, true); // generous: the nearest thing roughly between the hands
+    if (d < zoomMin) { zoomMin = d; zoomKey = null; }
+    if (now < zoomWait) { zoomMin = zoomMax = zoomFar = d; zoomKey = null; } // just climbed out: parting the hands again is not a dive, yet
+    // Touching hands could be the wind-up for a dive or the wish to leave, and only what happens next says
+    // which: parted again straight away it is a dive, measured from where they met; rested together, we leave.
+    if (handsTouch(L, R, d)) {
+      if (!zoomMeet && zoomFar - d > T.zoomCame) zoomMeet = true;
+      zoomMin = d; zoomKey = null;
+      zoomRested = zoomMeet && level > 0 && now >= zoomWait ? zoomRested + dt : 0;
+    } else { zoomMeet = false; zoomRested = 0; }
+    const outward = clamp01(zoomRested / T.zoomRest);
+    // in: how far the hands have parted since they were closest, aimed at the nearest thing between them
+    if (!zoomKey && d - zoomMin > 0.25) zoomKey = zoomTarget(mx, my, true);
     const o = zoomKey, kind = o && o.kind;
     const free = o && (kind === 'galaxy' ? (!focusG || focusG === o || depth < 0.02) : kind === 'star' ? (!focusS || focusS === o || depth < 1.02) : (!focusP || focusP === o || depth < 2.02));
     const inward = free ? clamp01((d - zoomMin) / T.zoomPull) : 0;
-    // ...and the stroke inward from where they were widest, but only over open space, so that closing the
-    // hands over a star to dive into it is never mistaken for leaving
-    const outward = level > 0 && zoomMax > T.zoomOutMin && !zoomTarget(mx, my) ? clamp01((zoomMax - d) / (zoomMax * 0.5)) : 0;
     if (inward > 0) {
       if (kind === 'galaxy') focusG = o; else if (kind === 'star') focusS = o; else focusP = o;
       nudge = inward * 0.25;
       if (inward >= 1) { diveInto(o); nudge = 0; }
     } else if (outward > 0) {
       nudge = -outward * 0.25;
-      if (outward >= 1) { surface(); nudge = 0; }
+      if (outward >= 1) { surface(); zoomWait = now + T.zoomInDelay; zoomMeet = false; zoomRested = 0; zoomFar = 0; nudge = 0; }
     }
   }
   zoomHeld = nudge; zoomShow = nudge !== 0;
@@ -657,7 +681,7 @@ const planetRadius = p => sysR * (0.016 + 0.068 * Math.pow(planetT(p), 1.2));
 const planetName = p => { const t = planetT(p); return t < 0.3 ? 'Rocky world' : t < 0.55 ? 'Ocean world' : t < 0.78 ? 'Ice giant' : 'Gas giant'; };
 const hexes = rows => rows.map(r => r.map(c => new THREE.Color(c)));
 const ROCKS = hexes([['#5c5148', '#8a7a6a', '#b9b0a5'], ['#6b3a26', '#a85a36', '#d9a27a'], ['#4a4a52', '#77777f', '#b5b5c0'], ['#3d3326', '#7d6a45', '#c9b47f']]);
-const WORLDS = hexes([['#12408f', '#3f8f4a', '#ffffff'], ['#0f4f8a', '#b89a5a', '#f2f6ff'], ['#1a5a6a', '#7fae5a', '#ffffff'], ['#1b3a9a', '#5a9a6a', '#eef4ff']]);
+const WORLDS = hexes([['#12408f', '#8a6a48', '#ffffff'], ['#0f4f8a', '#b89a5a', '#f2f6ff'], ['#1a5a6a', '#7d6f5a', '#ffffff'], ['#1b3a9a', '#9a5f3c', '#eef4ff']]); // sea, bare land, cloud: nothing grows yet
 const ICES = hexes([['#2f6fb0', '#7fd0e6', '#d9f6ff'], ['#3a4fc0', '#6fa0ff', '#cfe0ff'], ['#2a8f8f', '#8fe6d0', '#e6fff6']]);
 const GASES = hexes([['#8a5a32', '#e0b888', '#fff0d8'], ['#a0522d', '#f0c27a', '#ffe6b0'], ['#6a4a7a', '#d09ac0', '#ffe0f0'], ['#7a6a3a', '#e6d28a', '#fffbe0']]);
 function planetLook(p) {
@@ -1094,7 +1118,7 @@ const globeMat = new THREE.ShaderMaterial({
       vec2 q = p / R; float z = sqrt(max(0.0, 1.0 - dot(q, q)));
       vec3 m = uRot * vec3(q, z), Lp = uRot * uLight;          // this point, and the sun, in the planet's own frame
       float lat = asin(clamp(m.y, -1.0, 1.0)), lon = atan(m.x, m.z);
-      vec3 col, N = m; float spec = 0.0, lights = 0.0;
+      vec3 col, N = m; float spec = 0.0;
       if (uKind < 0.5) {
         vec2 uv = vec2(lon / 6.2831853 + 0.5, lat / 3.14159265 + 0.5);
         vec4 t = texture2D(uMap, uv);
@@ -1119,9 +1143,8 @@ const globeMat = new THREE.ShaderMaterial({
           frost = smoothstep(0.7 - cold * 0.75, 0.74 - cold * 0.75, noise3(m * 48.0 + uSeed) * 0.6 + grit * 0.4) * step(0.001, cold);
         } else {
           float air = warm - el * 0.9;                            // colder the higher you climb
-          col = mix(uSand, uLow, smoothstep(0.28, 0.5, damp));    // desert, grassland, forest
+          col = mix(uSand, uLow, smoothstep(0.28, 0.5, damp));    // dry sand, bare earth, dark damp ground (nothing grows here yet)
           col = mix(col, uForest, smoothstep(0.6, 0.85, damp));
-          col = mix(col, vec3(0.07, 0.22, 0.06), clamp(t.a, 0.0, 1.0) * (1.0 - uLife));   // even a dead world greens if you bring it rain
           col = mix(col, vec3(0.3, 0.28, 0.22), smoothstep(0.3, 0.05, air) * uLife);      // tundra
           if (uSea > uBase) col = mix(col, vec3(0.55, 0.47, 0.3), smoothstep(0.03, 0.0, el) * 0.8);   // beaches
           col = mix(col, uHigh, smoothstep(0.16, 0.45, el + (fine - 0.5) * 0.1));          // bare rock on the heights
@@ -1129,9 +1152,6 @@ const globeMat = new THREE.ShaderMaterial({
           vec3 east = normalize(vec3(m.z, 0.0, -m.x) + 1e-5), north = cross(m, east);
           N = normalize(m - 0.1 * (east * gE + north * gN));     // slopes catch the light
           frost = smoothstep(0.02, -0.07, air + (grit - 0.5) * 0.1);
-          // where the living is easy, somebody has settled: lights come on after dark
-          lights = clamp(uLife + t.a, 0.0, 1.0) * step(0.2, air) * step(el, 0.3) * smoothstep(0.3, 0.5, damp) * (1.0 - frost)
-            * smoothstep(0.58, 0.72, fbm3(m * 10.0 + uSeed + 5.0)) * step(0.55, hash3(floor(m * 120.0)));
         }
         col = mix(col, uPeak, frost); spec *= 1.0 - frost;
       } else {                                                    // a giant: bands of cloud sliding past each other
@@ -1153,7 +1173,7 @@ const globeMat = new THREE.ShaderMaterial({
         }
       }
       float sun = dot(m, Lp), day = smoothstep(-0.06, 0.16, sun);
-      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day + vec3(1.0, 0.75, 0.38) * lights * (1.0 - day) * 0.8;
+      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day;
       float ca = cos(uTime * 0.012), sa = sin(uTime * 0.012);      // weather drifting over it all
       float cloud = smoothstep(0.5, 0.72, fbm3(vec3(m.x * ca - m.z * sa, m.y, m.x * sa + m.z * ca) * 3.2 + uSeed * 1.7)) * uCloud;
       col = mix(col, vec3(0.07 + 0.93 * max(0.0, sun)), cloud);
@@ -1182,13 +1202,13 @@ globe.frustumCulled = false; globe.visible = false; globe.renderOrder = 2.7;
 scene.add(globe);
 
 const SEA_DEEP = new THREE.Color(0.01, 0.04, 0.16), SEA_SHALLOW = new THREE.Color(0.04, 0.22, 0.36), SAND = new THREE.Color(0.55, 0.47, 0.3);
-const FOREST = new THREE.Color(0.03, 0.12, 0.04), ROCK_HIGH = new THREE.Color(0.2, 0.17, 0.15), WHITE = new THREE.Color(1, 1, 1), SKY = new THREE.Color(0.25, 0.45, 1);
+const ROCK_HIGH = new THREE.Color(0.2, 0.17, 0.15), WHITE = new THREE.Color(1, 1, 1), SKY = new THREE.Color(0.25, 0.45, 1);
 function globeLook(p, u) {
   const kind = planetKind(p), c = planetLook(p).c;
   u.uKind.value = isSolid(p) ? 0 : 1; u.uSeed.value = p.seed % 100; u.uRing.value = p.rings; u.uTilt.value = ((p.seed % 7) - 3) * 0.14;
   if (kind === 'ocean') {
     u.uDeep.value.copy(c[0]).multiplyScalar(0.45); u.uShallow.value.copy(c[0]).lerp(SEA_SHALLOW, 0.5); u.uSand.value.copy(SAND);
-    u.uLow.value.copy(c[1]); u.uForest.value.copy(c[1]).lerp(FOREST, 0.6); u.uHigh.value.copy(ROCK_HIGH); u.uPeak.value.copy(WHITE); u.uAtm.value.copy(SKY);
+    u.uLow.value.copy(c[1]); u.uForest.value.copy(c[1]).multiplyScalar(0.55); u.uHigh.value.copy(ROCK_HIGH); u.uPeak.value.copy(WHITE); u.uAtm.value.copy(SKY);
     u.uTemp.value = 0.05; u.uLife.value = 1; u.uCloud.value = 0.6; u.uBase.value = SEA_MIN;
   } else if (kind === 'rock') { // dry to begin with, but it will hold water if you give it some
     u.uDeep.value.copy(SEA_DEEP); u.uShallow.value.copy(SEA_SHALLOW); u.uSand.value.copy(c[0]).lerp(c[2], 0.3);
@@ -1271,7 +1291,7 @@ function planetRiver(hand, now) {
 }
 // A pointing finger rested on one spot changes the climate around it, and goes on to the next kind for as
 // long as it stays: [name, warmer or colder, wetter or drier].
-const CLIMATES = [['Snow and ice', -1.3, 0.2], ['Thaw', 0.9, 0], ['Desert', 0.6, -1], ['Jungle', 0.3, 1], ['As it was', 0, 0]];
+const CLIMATES = [['Snow and ice', -1.3, 0.2], ['Thaw', 0.9, 0], ['Desert', 0.6, -1], ['As it was', 0, 0]];
 function planetClimate(hand, now, dt) {
   const p = focusP, tip = hand.tips[1];
   if (!p || !isSolid(p) || !globePoint(tip.x, tip.y)) { hand.dwell = null; return false; }
@@ -1781,11 +1801,11 @@ const LEGEND = { // one line per level: universe, galaxy, solar system, a world 
     '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit',
     '<b>Pinch</b>hold to swell the land, drag to draw a mountain range',
     '<b>Pinch</b>hold on the planet to brew a storm'],
-  zoom: ['<b>Both hands open</b>together over a galaxy, then sweep apart to dive in',
-    '<b>Both hands open</b>sweep apart over a star to visit, or together to leave',
-    '<b>Both hands open</b>sweep apart over a planet to land, or together to leave',
-    '<b>Open hand</b>holds or turns the planet for the other hand; sweep both together to leave',
-    '<b>Open hand</b>holds or turns the planet; sweep both together to leave'],
+  zoom: ['<b>Both hands open</b>sweep apart over a galaxy to dive in',
+    '<b>Both hands open</b>sweep apart over a star to visit; touch and rest them together to leave',
+    '<b>Both hands open</b>sweep apart over a planet to land; touch and rest them together to leave',
+    '<b>Open hand</b>holds or turns the planet for the other hand; touch and rest both together to leave',
+    '<b>Open hand</b>holds or turns the planet; touch and rest both together to leave'],
   point: ['<b>Point</b>draw with light', '<b>Point</b>draw with light', '<b>Point</b>draw with light',
     '<b>Point</b>rest on a spot to change its climate', '<b>Point</b>draw with light'],
   peace: ['<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors',
