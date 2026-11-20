@@ -508,7 +508,7 @@ function updateGalaxies(dt) {
     g.mat.uniforms.uTime.value += dt * (g.held && g.growing ? 2.2 : 1) * (1 + g.swallow * 7) * (focus ? 1 - 0.92 * E1 : 1);
     const fadeIn = Math.min(1, g.grow * 3);
     const density = Math.min(1, 0.2 + 0.22 * scale * scale); // same star count in less area would burn out
-    const seen = focus ? (1 - 0.3 * E1) * (1 - 0.6 * E2) : 1 - E1;
+    const seen = focus ? (1 - 0.3 * E1) * (1 - 0.6 * E2) * (1 - 0.5 * E3) : 1 - E1;
     const alpha = fadeIn * density * (g.held && !g.growing ? 1.3 : 1) * seen;
     g.mat.uniforms.uAlpha.value = alpha;
     g.points.visible = alpha > 0.003;
@@ -521,7 +521,7 @@ function updateGalaxies(dt) {
 // is under way, so the view starts answering the hands before the dive commits.
 const C0 = new THREE.Vector3(0, 0, -1), FACE = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
 const SYSTEM_ZOOM = 5;
-let level = 0, depth = 0, E1 = 0, E2 = 0, focusG = null, focusS = null;
+let level = 0, depth = 0, E1 = 0, E2 = 0, E3 = 0, focusG = null, focusS = null, focusP = null;
 let zoomNudge = 0, zoomLock = false, zoomKey = null, zoomOn = false, zoomMin = 0, zoomMax = 0, zoomGap = 0, zoomHeld = 0, zoomShow = false;
 let galS = 9, sysR = 4.8, gK = 1, zM = 1, zPx = 0, zPy = 0, bodyTime = 0;
 const gO = new THREE.Vector3(), _w = new THREE.Vector3();
@@ -530,12 +530,14 @@ const ease = t => t * t * (3 - 2 * t), clamp01 = t => Math.min(1, Math.max(0, t)
 function updateView(dt) {
   galS = Math.max(viewW, viewH) * 0.5;  // how big a galaxy's disc is drawn once we are inside it
   sysR = Math.min(viewW, viewH) * 0.47; // the widest orbit that still fits on screen
-  if (level === 2 && !focusS) setLevel(1);
+  if (level === 3 && !focusP) setLevel(2);
+  if (level >= 2 && !focusS) setLevel(1);
   if (level >= 1 && !focusG) setLevel(0);
   const target = level + zoomNudge;
   depth += (target - depth) * Math.min(1, dt * 3);
   if (Math.abs(target - depth) < 0.0015) depth = target;
-  E1 = ease(clamp01(depth)); E2 = ease(clamp01(depth - 1));
+  E1 = ease(clamp01(depth)); E2 = ease(clamp01(depth - 1)); E3 = ease(clamp01(depth - 2));
+  if (level < 3 && E3 === 0 && zoomKey !== focusP) focusP = null;
   if (level < 2 && E2 === 0 && zoomKey !== focusS) focusS = null;
   if (level < 1 && E1 === 0 && zoomKey !== focusG) focusG = null;
   if (focusG) { gO.lerpVectors(focusG.pos, C0, E1); gK = focusG.radius * Math.pow(galS / focusG.radius, E1); }
@@ -555,12 +557,16 @@ function unplace(x, y, out) {
   out.x = (x - gO.x) / gK; out.y = (y - gO.y) / gK; return out;
 }
 
-function setLevel(n) { level = n; zoomLock = true; zoomKey = null; zoomOn = false; zoomHeld = 0; refreshChrome(); note(ARRIVE[n], 6); }
+function setLevel(n) {
+  level = n; zoomLock = true; zoomKey = null; zoomOn = false; zoomHeld = 0; refreshChrome();
+  note(n === 3 && focusP && !isSolid(focusP) ? 'Pinch the clouds to brew a storm' : ARRIVE[n], 6);
+}
 
 function diveInto(o) {
   for (const h of [hands.Left, hands.Right]) h.release();
   if (o.kind === 'galaxy') { o.vel.set(0, 0, 0); focusG = o; setLevel(1); }
-  else { focusS = o; setLevel(2); }
+  else if (o.kind === 'star') { focusS = o; setLevel(2); }
+  else { focusP = o; setLevel(3); }
   warp(1);
 }
 
@@ -579,7 +585,7 @@ function surface() {
 // or a star and sweep them apart: dive into it. Start wide and sweep them together over open space: climb
 // back out. It is the sweep that counts, not the pose, so two open hands held still do nothing at all.
 function zoomTarget(x, y, loose) {
-  const list = level === 0 ? galaxies : level === 1 && focusG ? focusG.stars : null;
+  const list = level === 0 ? galaxies : level === 1 && focusG ? focusG.stars : level === 2 && focusS ? focusS.planets : null;
   let best = null, bd = Infinity;
   if (list) for (const o of list) {
     if (o.kind === 'galaxy' && !o.alive) continue;
@@ -605,14 +611,14 @@ function updateZoom(L, R, now, dt) {
     // the stroke outward is measured from where the hands were closest, and aims at whatever lay between them then
     if (d <= zoomMin) { zoomMin = d; zoomKey = null; }
     if (!zoomKey && zoomMin < T.zoomInStart && d - zoomMin < T.zoomPull * 0.6) zoomKey = zoomTarget(mx, my, true); // generous: the nearest thing roughly between the hands
-    const o = zoomKey, isG = o && o.kind === 'galaxy';
-    const free = o && (isG ? (!focusG || focusG === o || depth < 0.02) : (!focusS || focusS === o || depth < 1.02));
+    const o = zoomKey, kind = o && o.kind;
+    const free = o && (kind === 'galaxy' ? (!focusG || focusG === o || depth < 0.02) : kind === 'star' ? (!focusS || focusS === o || depth < 1.02) : (!focusP || focusP === o || depth < 2.02));
     const inward = free ? clamp01((d - zoomMin) / T.zoomPull) : 0;
     // ...and the stroke inward from where they were widest, but only over open space, so that closing the
     // hands over a star to dive into it is never mistaken for leaving
     const outward = level > 0 && zoomMax > T.zoomOutMin && !zoomTarget(mx, my) ? clamp01((zoomMax - d) / (zoomMax * 0.5)) : 0;
     if (inward > 0) {
-      if (isG) focusG = o; else focusS = o;
+      if (kind === 'galaxy') focusG = o; else if (kind === 'star') focusS = o; else focusP = o;
       nudge = inward * 0.25;
       if (inward >= 1) { diveInto(o); nudge = 0; }
     } else if (outward > 0) {
@@ -630,6 +636,7 @@ const newSeed = () => (Math.random() * 1e9) | 0;
 const mkStar = (u, v, grow, seed) => ({ kind: 'star', u, v, grow, seed, planets: [],
   held: false, growing: false, isNew: false, holder: null, swallow: 0, wx: 0, wy: 0, wr: 0.1, reach: 1.4 });
 const mkPlanet = (r, a, grow, seed) => ({ kind: 'planet', r, a, grow, seed, rings: 0, moons: [],
+  map: null, sea: null, spots: [], wind: 1, // the surface: hand-made changes to the terrain, sea level, a giant's storms and winds
   held: false, growing: false, isNew: false, holder: null, swallow: 0, wx: 0, wy: 0, reach: 1.1 });
 
 const starT = s => Math.min(1, s.grow / STAR_GROW);
@@ -681,6 +688,8 @@ function removeBody(o) {
   const list = o.kind === 'star' ? focusG?.stars : focusS?.planets, i = list ? list.indexOf(o) : -1;
   if (i >= 0) list.splice(i, 1);
   if (focusS === o) focusS = null;
+  if (focusP === o) focusP = null;
+  if (terrainOf === o) terrainOf = null;
   markDirty();
 }
 const inCloud = s => nebulae.some(n => n.space === focusG.id && Math.hypot(n.x - s.u, n.y - s.v) < n.size * 0.6);
@@ -714,6 +723,7 @@ function holdBody(hand, o, dt) {
 // a planet just bursts into rubble.
 function shatter(p, power) {
   const list = level === 0 ? galaxies.filter(g => g.alive) : level === 1 && focusG ? focusG.stars : focusS ? focusS.planets : null;
+  if (level === 3) return planetImpact(p, power, performance.now() / 1000);
   if (!list || zoomLock) return;
   let best = null, bd = Infinity;
   for (const o of list) {
@@ -842,8 +852,14 @@ function drawPlanet(i, x, y, r, seed, look, rings, lx, ly, alpha) {
   u.uTime.value = bodyTime; u.uAlpha.value = alpha;
 }
 
-function updateBodies(dt) {
+function updateBodies(dt, now) {
   let ns = 0, np = 0, no = 0;
+  // Landing on a planet: the whole system swells around it until that one planet fills the view.
+  const fp = focusP && focusS && E3 > 0 ? focusP : null;
+  let z3 = 1, fx = 0, fy = 0;
+  if (fp) { globeR = Math.min(viewW, viewH) * 0.34; z3 = Math.pow(globeR / planetRadius(fp), E3); fx = Math.cos(fp.a) * fp.r * sysR; fy = Math.sin(fp.a) * fp.r * sysR; }
+  const tx = x => (x - fx) * z3 + fx * (1 - E3), ty = y => (y - fy) * z3 + fy * (1 - E3), fade = E2 * (1 - E3);
+  globe.visible = false;
   if (focusG && E1 > 0.002) {
     const k = gK / galS;
     for (const s of focusG.stars) {
@@ -851,11 +867,11 @@ function updateBodies(dt) {
       place(s.u, s.v, _w);
       // the star we are diving toward swells into a sun; the others slide away and fade
       const r = (focus ? THREE.MathUtils.lerp(starRadius(s) * k, sunRadius(s), E2) : starRadius(s) * k * zM) * (1 - 0.9 * s.swallow);
-      const a = E1 * (focus ? 1 : 1 - E2);
+      const a = E1 * (focus ? 1 - E3 : 1 - E2);
       s.wx = _w.x; s.wy = _w.y; s.wr = r; s.reach = Math.max(1.4, r + 0.8);
       if (a < 0.003) continue;
       const m = starPool[ns] || (starPool[ns] = makeStarMesh()), u = m.material.uniforms; ns++;
-      m.visible = true; m.position.set(_w.x, _w.y, 0); m.scale.setScalar(r / 0.3 * 2);
+      m.visible = true; m.position.set(tx(_w.x), ty(_w.y), 0); m.scale.setScalar(r * z3 / 0.3 * 2);
       starColor(starT(s), u.uCol.value);
       u.uSeed.value = s.seed % 100; u.uTime.value = bodyTime; u.uDetail.value = focus ? E2 : 0;
       u.uAlpha.value = a * (s.held && s.growing ? 1.15 : 1);
@@ -866,22 +882,356 @@ function updateBodies(dt) {
   const s = focusS;
   if (s && E2 > 0.002) {
     for (const p of s.planets) {
-      if (!p.held && p.swallow <= 0) p.a += dt * 0.11 / Math.pow(p.r, 1.5); // inner planets race, outer ones crawl
-      const R = p.r * sysR * E2, cx = Math.cos(p.a), cy = Math.sin(p.a), x = cx * R, y = cy * R, shrink = 1 - 0.9 * p.swallow;
-      const pr = planetRadius(p) * (0.4 + 0.6 * E2) * shrink;
+      if (!p.held && p.swallow <= 0 && !fp) p.a += dt * 0.11 / Math.pow(p.r, 1.5); // inner planets race, outer ones crawl; all wait while we are down on one
+      const R = p.r * sysR * E2, cx = Math.cos(p.a), cy = Math.sin(p.a), x = tx(cx * R), y = ty(cy * R), shrink = 1 - 0.9 * p.swallow;
+      const pr = planetRadius(p) * (0.4 + 0.6 * E2) * shrink * z3;
       p.wx = x; p.wy = y; p.reach = Math.max(1.1, pr + 0.7);
-      drawPlanet(np++, x, y, pr, p.seed, planetLook(p), p.rings, -cx, -cy, E2);
+      if (p === fp) updateGlobe(dt, now, x, y, pr, -cx, -cy); // the far-off dot gives way to the real globe
+      drawPlanet(np++, x, y, pr, p.seed, planetLook(p), p.rings, -cx, -cy, p === fp ? E2 * Math.max(0, 1 - E3 * 4) : fade);
       for (const m of p.moons) {
         m.a += dt * 0.9 / (0.5 + m.d);
-        const md = pr * (1.7 + 3.3 * m.d) + 0.1;
-        drawPlanet(np++, x + Math.cos(m.a) * md, y + Math.sin(m.a) * md, sysR * (0.008 + (m.seed % 5) * 0.001) * shrink, m.seed, moonLook(m), 0, -cx, -cy, E2);
+        const md = pr * (1.7 + 3.3 * m.d) + 0.1 * z3;
+        drawPlanet(np++, x + Math.cos(m.a) * md, y + Math.sin(m.a) * md, sysR * (0.008 + (m.seed % 5) * 0.001) * shrink * z3, m.seed, moonLook(m), 0, -cx, -cy, fade);
       }
       const o = orbitPool[no] || (orbitPool[no] = makeOrbit()); no++;
-      o.visible = true; o.scale.setScalar(Math.max(1e-3, R)); o.material.opacity = (p.held ? 0.4 : 0.14) * E2;
+      o.visible = true; o.position.set(tx(0), ty(0), 0); o.scale.setScalar(Math.max(1e-3, R * z3)); o.material.opacity = (p.held ? 0.4 : 0.14) * fade;
     }
   }
   for (let i = np; i < planetPool.length; i++) planetPool[i].visible = false;
   for (let i = no; i < orbitPool.length; i++) orbitPool[i].visible = false;
+}
+
+// ---------------------------------------------------------------- planet surfaces
+// The fourth level: one planet, close up, as a globe you can reshape. A rocky or ocean world has real
+// terrain: a height map wrapped round the sphere, built from the planet's seed and then edited by hand.
+// Gas and ice giants have no ground, so they get weather instead: bands, winds and storms.
+const MAP_W = 256, MAP_H = 128, MAP_N = MAP_W * MAP_H;
+const mapH = new Float32Array(MAP_N), mapBase = new Float32Array(MAP_N), mapR = new Float32Array(MAP_N); // height now, height as generated, rivers
+const mapHalf = new Uint16Array(MAP_N * 4);
+const mapTex = new THREE.DataTexture(mapHalf, MAP_W, MAP_H, THREE.RGBAFormat, THREE.HalfFloatType);
+mapTex.wrapS = THREE.RepeatWrapping; mapTex.wrapT = THREE.ClampToEdgeWrapping;
+mapTex.magFilter = mapTex.minFilter = THREE.LinearFilter; mapTex.generateMipmaps = false;
+const colSin = new Float32Array(MAP_W), colCos = new Float32Array(MAP_W), rowSin = new Float32Array(MAP_H), rowCos = new Float32Array(MAP_H);
+for (let i = 0; i < MAP_W; i++) { const lon = ((i + 0.5) / MAP_W - 0.5) * TAU; colSin[i] = Math.sin(lon); colCos[i] = Math.cos(lon); }
+for (let j = 0; j < MAP_H; j++) { const lat = ((j + 0.5) / MAP_H - 0.5) * Math.PI; rowSin[j] = Math.sin(lat); rowCos[j] = Math.cos(lat); }
+
+const planetKind = p => { const t = planetT(p); return t < 0.3 ? 'rock' : t < 0.55 ? 'ocean' : t < 0.78 ? 'ice' : 'gas'; };
+const isSolid = p => planetT(p) < 0.55;
+const SEA_MIN = -1.05, SEA_MAX = 1.1, H_MIN = -1.4, H_MAX = 1.4, SPOT_MAX = 8;
+
+// seeded 3D noise, so terrain wraps round the sphere without a seam
+function hash3(x, y, z, s) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(z, 2147483647) ^ s;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function noise3(x, y, z, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  let fx = x - xi, fy = y - yi, fz = z - zi;
+  fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy); fz = fz * fz * (3 - 2 * fz);
+  const a = hash3(xi, yi, zi, s), b = hash3(xi + 1, yi, zi, s), c = hash3(xi, yi + 1, zi, s), d = hash3(xi + 1, yi + 1, zi, s);
+  const e = hash3(xi, yi, zi + 1, s), f = hash3(xi + 1, yi, zi + 1, s), g = hash3(xi, yi + 1, zi + 1, s), h = hash3(xi + 1, yi + 1, zi + 1, s);
+  const lo = a + (b - a) * fx + (c + (d - c) * fx - a - (b - a) * fx) * fy, hi = e + (f - e) * fx + (g + (h - g) * fx - e - (f - e) * fx) * fy;
+  return lo + (hi - lo) * fz;
+}
+function fbm3(x, y, z, s, oct) {
+  let v = 0, a = 0.5;
+  for (let o = 0; o < oct; o++) { v += a * noise3(x, y, z, s + o * 131); x *= 2.03; y *= 2.03; z *= 2.03; a *= 0.5; }
+  return v;
+}
+
+// every map texel within `rad` radians of a point on the sphere: fn(index, distance as a fraction of rad)
+let dirtyLo = MAP_H, dirtyHi = -1;
+function brush(lon, lat, rad, fn) {
+  const cl = Math.cos(lat), cx = Math.sin(lon) * cl, cy = Math.sin(lat), cz = Math.cos(lon) * cl;
+  const j0 = Math.max(0, Math.floor((lat - rad) / Math.PI * MAP_H + MAP_H / 2)), j1 = Math.min(MAP_H - 1, Math.ceil((lat + rad) / Math.PI * MAP_H + MAP_H / 2));
+  const ic = Math.floor((lon / TAU + 0.5) * MAP_W), half = MAP_W / 2;
+  for (let j = j0; j <= j1; j++) {
+    const all = rowCos[j] < 0.06 || Math.abs(lat) + rad > Math.PI / 2, span = all ? half : Math.min(half, Math.ceil(rad / rowCos[j] / TAU * MAP_W) + 1);
+    for (let di = -span; di < (span === half ? span : span + 1); di++) {
+      const i = ((ic + di) % MAP_W + MAP_W) % MAP_W;
+      const d = Math.acos(Math.min(1, cx * colSin[i] * rowCos[j] + cy * rowSin[j] + cz * colCos[i] * rowCos[j]));
+      if (d < rad) fn(j * MAP_W + i, d / rad);
+    }
+  }
+  dirtyLo = Math.min(dirtyLo, j0); dirtyHi = Math.max(dirtyHi, j1);
+}
+function syncMap(all) { // copy edited rows into the texture
+  if (all) { dirtyLo = 0; dirtyHi = MAP_H - 1; }
+  if (dirtyHi < dirtyLo) return;
+  for (let k = dirtyLo * MAP_W, e = (dirtyHi + 1) * MAP_W; k < e; k++) {
+    mapHalf[k * 4] = THREE.DataUtils.toHalfFloat(mapH[k]); mapHalf[k * 4 + 1] = THREE.DataUtils.toHalfFloat(mapR[k]);
+  }
+  mapTex.needsUpdate = true; dirtyLo = MAP_H; dirtyHi = -1;
+}
+const clampH = v => (v < H_MIN ? H_MIN : v > H_MAX ? H_MAX : v);
+function stampCrater(H, lon, lat, rad, depth) { // a bowl with a raised rim; anything in it (rivers too) is gone
+  brush(lon, lat, rad * 1.5, (k, d0) => {
+    const d = d0 * 1.5;
+    let v = H[k] + depth * 0.35 * Math.exp(-(((d - 1) / 0.22) ** 2));
+    if (d < 1) { v -= depth * (1 - d * d); if (H === mapH) mapR[k] = 0; }
+    H[k] = clampH(v);
+  });
+}
+
+// Build a planet's terrain from its seed. Returns the sea level it starts with.
+function generateTerrain(p, H) {
+  const ocean = planetKind(p) === 'ocean', r = mulberry32(p.seed ^ 0x51ed270b), s = p.seed | 0;
+  const f = 1.2 + r() * 1.2, ox = r() * 40, oy = r() * 40, oz = r() * 40, rough = 0.35 + r() * 0.5;
+  for (let j = 0, k = 0; j < MAP_H; j++) for (let i = 0; i < MAP_W; i++, k++) {
+    const x = colSin[i] * rowCos[j], y = rowSin[j], z = colCos[i] * rowCos[j];
+    if (ocean) { // continents, with mountain ranges ridged up along their spines
+      let h = (fbm3(x * f + ox, y * f + oy, z * f + oz, s, 6) - 0.5) * 2.7;
+      if (h > 0) { const rg = 1 - Math.abs(2 * fbm3(x * 3.3 + oz, y * 3.3 + ox, z * 3.3 + oy, s + 977, 5) - 1); h += rg * rg * rough * Math.min(1, h * 4); }
+      H[k] = clampH(h);
+    } else H[k] = (fbm3(x * f + ox, y * f + oy, z * f + oz, s, 6) - 0.5) * 1.1 + (fbm3(x * 6 + oy, y * 6 + oz, z * 6 + ox, s + 31, 4) - 0.5) * 0.3 * rough;
+  }
+  if (!ocean) { // a dry, battered world
+    for (let n = 25 + ((r() * 45) | 0); n > 0; n--) {
+      const rad = 0.03 + r() * r() * 0.2;
+      stampCrater(H, (r() - 0.5) * TAU, Math.asin(r() * 2 - 1), rad, rad * (0.8 + r() * 0.8));
+    }
+    return SEA_MIN;
+  }
+  return (r() - 0.4) * 0.3;
+}
+
+// Only what was changed by hand is stored: the difference from the generated terrain, run-length packed.
+function pack(n, at) {
+  let s = '', any = false;
+  for (let i = 0; i < n;) {
+    const v = at(i); let run = 1;
+    while (run < 255 && i + run < n && at(i + run) === v) run++;
+    if (v) any = true;
+    s += String.fromCharCode(run, v); i += run;
+  }
+  return any ? btoa(s) : '';
+}
+function unpack(b64, n, put) {
+  const s = atob(b64);
+  for (let c = 0, i = 0; c + 1 < s.length && i < n; c += 2) for (let run = s.charCodeAt(c), v = s.charCodeAt(c + 1); run > 0 && i < n; run--, i++) put(i, v);
+}
+let terrainOf = null, terrainDirty = false, seaDefault = 0;
+function storeTerrain() {
+  if (!terrainOf || !terrainDirty) return;
+  terrainDirty = false;
+  if (!isSolid(terrainOf)) return;
+  const h = pack(MAP_N, i => (Math.max(-127, Math.min(127, Math.round((mapH[i] - mapBase[i]) * 80))) + 256) & 255), r = pack(MAP_N, i => Math.round(mapR[i] * 15));
+  terrainOf.map = h || r ? { h, r } : null;
+}
+function loadTerrain(p) {
+  storeTerrain();
+  terrainOf = p; terrainDirty = false;
+  if (!isSolid(p)) return;
+  rng = Math.random;
+  seaDefault = generateTerrain(p, mapBase);
+  dirtyLo = MAP_H; dirtyHi = -1;
+  mapH.set(mapBase); mapR.fill(0);
+  if (p.map) try {
+    if (p.map.h) unpack(p.map.h, MAP_N, (i, v) => { mapH[i] = clampH(mapBase[i] + (v > 127 ? v - 256 : v) / 80); });
+    if (p.map.r) unpack(p.map.r, MAP_N, (i, v) => { mapR[i] = v / 15; });
+  } catch (err) { console.warn('Could not restore this planet\'s terrain:', err); }
+  syncMap(true);
+}
+const seaOf = p => (p.sea == null ? seaDefault : p.sea);
+
+// --- the globe
+const NOISE3_GLSL = /* glsl */`
+  float hash3(vec3 p){ p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+  float noise3(vec3 x){ vec3 i = floor(x), f = fract(x); f = f*f*(3.0-2.0*f);
+    return mix(mix(mix(hash3(i), hash3(i+vec3(1,0,0)), f.x), mix(hash3(i+vec3(0,1,0)), hash3(i+vec3(1,1,0)), f.x), f.y),
+               mix(mix(hash3(i+vec3(0,0,1)), hash3(i+vec3(1,0,1)), f.x), mix(hash3(i+vec3(0,1,1)), hash3(i+vec3(1,1,1)), f.x), f.y), f.z); }
+  float fbm3(vec3 p){ float v = 0.0, a = 0.5; for(int i=0;i<4;i++){ v += a*noise3(p); p = p*2.03 + 7.0; a *= 0.5; } return v; }`;
+const col3 = (r, g, b) => ({ value: new THREE.Color().setRGB(r, g, b) });
+const globeMat = new THREE.ShaderMaterial({
+  uniforms: { uMap: { value: mapTex }, uRot: { value: new THREE.Matrix3() }, uLight: { value: new THREE.Vector3(0, 0, 1) },
+    uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 }, uKind: { value: 0 }, uSea: { value: 0 }, uBase: { value: -1.5 }, uSnow: { value: 0.55 }, uPolar: { value: 0.5 },
+    uCloud: { value: 0 }, uRing: { value: 0 }, uTilt: { value: 0 }, uBands: { value: 9 }, uWind: { value: 1 },
+    uDeep: col3(0, 0, 0), uShallow: col3(0, 0, 0), uSand: col3(0, 0, 0), uLow: col3(0, 0, 0), uHigh: col3(0, 0, 0), uPeak: col3(1, 1, 1), uAtm: col3(0, 0, 0),
+    uSpots: { value: Array.from({ length: SPOT_MAX }, () => new THREE.Vector4()) } },
+  vertexShader: QUAD_VERT,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform sampler2D uMap; uniform mat3 uRot; uniform vec3 uLight, uDeep, uShallow, uSand, uLow, uHigh, uPeak, uAtm;
+    uniform float uTime, uSeed, uAlpha, uKind, uSea, uBase, uSnow, uPolar, uCloud, uRing, uTilt, uBands, uWind;
+    uniform vec4 uSpots[${SPOT_MAX}];
+    ${NOISE3_GLSL}
+    void main(){
+      vec2 p = (vUv - 0.5) * 2.0; float r = length(p);
+      const float R = 0.4;
+      float disc = smoothstep(R, R - 0.004, r);
+      vec2 q = p / R; float z = sqrt(max(0.0, 1.0 - dot(q, q)));
+      vec3 m = uRot * vec3(q, z), Lp = uRot * uLight;          // this point, and the sun, in the planet's own frame
+      float lat = asin(clamp(m.y, -1.0, 1.0)), lon = atan(m.x, m.z);
+      vec3 col, N = m; float spec = 0.0;
+      if (uKind < 0.5) {
+        vec2 uv = vec2(lon / 6.2831853 + 0.5, lat / 3.14159265 + 0.5);
+        vec4 t = texture2D(uMap, uv);
+        const float ex = 1.0 / ${MAP_W}.0, ey = 1.0 / ${MAP_H}.0;
+        float gE = (texture2D(uMap, uv + vec2(ex, 0.0)).r - texture2D(uMap, uv - vec2(ex, 0.0)).r) / (2.0 * ex * 6.2831853 * max(0.12, cos(lat)));
+        float gN = (texture2D(uMap, uv + vec2(0.0, ey)).r - texture2D(uMap, uv - vec2(0.0, ey)).r) / (2.0 * ey * 3.14159265);
+        float fine = fbm3(m * 22.0 + uSeed);
+        float h = t.r + (fine - 0.5) * 0.06, depth = uSea - h;
+        float ground = max(uSea, uBase);                          // heights are judged from the sea, or on a dry world from its plains
+        bool wet = depth > 0.0 || t.g > 0.5;
+        if (wet) {                                                // sea, lake or river
+          col = mix(uShallow, uDeep, smoothstep(0.0, 0.3, depth));
+          spec = pow(max(0.0, dot(m, normalize(Lp + uRot * vec3(0.0, 0.0, 1.0)))), 220.0) * 0.45;
+        } else {                                                  // shore, lowland, highland
+          float el = h - ground;
+          col = mix(uSand, uLow, smoothstep(0.0, 0.035, el + (uSea < uBase ? 0.25 : 0.0)));
+          col = mix(col, uHigh, smoothstep(0.14, 0.42, el + (fine - 0.5) * 0.1));
+          col *= 0.85 + 0.3 * fine;
+          vec3 east = normalize(vec3(m.z, 0.0, -m.x) + 1e-5), north = cross(m, east);
+          N = normalize(m - 0.1 * (east * gE + north * gN));     // slopes catch the light
+        }
+        float line = uSnow - abs(lat) * uPolar;                   // snow on the peaks, lower and lower toward the poles
+        float ice = smoothstep(line, line + 0.07, (wet ? -0.05 : h - ground) + (fine - 0.5) * 0.12);
+        col = mix(col, uPeak, ice); spec *= 1.0 - ice;
+      } else {                                                    // a giant: bands of cloud sliding past each other
+        float lonF = lon + uTime * 0.02 * uWind * (1.0 + 2.0 * sin(lat * uBands * 0.7 + uSeed));
+        vec3 mf = vec3(sin(lonF) * cos(lat), m.y, cos(lonF) * cos(lat));
+        float turb = fbm3(mf * vec3(3.0, 9.0, 3.0) + uSeed);
+        col = mix(uLow, uHigh, 0.5 + 0.5 * sin(lat * uBands + (turb - 0.5) * 3.0 * (0.4 + 0.3 * uWind)));
+        col = mix(col, uPeak, smoothstep(0.55, 0.8, fbm3(mf * vec3(5.0, 22.0, 5.0) + 3.0 + uSeed)) * 0.45);
+        for (int i = 0; i < ${SPOT_MAX}; i++) {                   // storms, and the scars of impacts
+          vec4 s = uSpots[i];
+          if (s.z <= 0.0) continue;
+          float dl = lon - s.x; dl = atan(sin(dl), cos(dl));
+          vec2 o = vec2(dl * cos(lat) * 0.6, lat - s.y) / s.z; float rr = length(o);
+          if (rr < 1.0) {
+            float sw = 0.5 + 0.5 * sin(atan(o.y, o.x) * 2.0 + rr * 9.0 - uTime * 0.8);
+            vec3 sc = s.w > 0.5 ? vec3(0.03, 0.02, 0.02) : mix(uPeak, vec3(0.8, 0.25, 0.12), 0.6) * (0.75 + 0.25 * sw);
+            col = mix(col, sc, smoothstep(1.0, 0.55, rr) * 0.88);
+          }
+        }
+      }
+      float sun = dot(m, Lp), day = smoothstep(-0.06, 0.16, sun);
+      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day;
+      float ca = cos(uTime * 0.012), sa = sin(uTime * 0.012);      // weather drifting over it all
+      float cloud = smoothstep(0.5, 0.72, fbm3(vec3(m.x * ca - m.z * sa, m.y, m.x * sa + m.z * ca) * 3.2 + uSeed * 1.7)) * uCloud;
+      col = mix(col, vec3(0.07 + 0.93 * max(0.0, sun)), cloud);
+      col += uAtm * pow(1.0 - z, 2.5) * 0.5 * max(0.0, sun * 0.7 + 0.3);
+      col *= disc * 0.6;                                          // a whole lit globe is a lot of light for the bloom to chew on
+      float a = disc;
+      col += uAtm * smoothstep(R * 1.1, R, r) * (1.0 - disc) * 0.3 * clamp(dot(p / max(r, 1e-4), uLight.xy) * 0.6 + 0.5, 0.0, 1.0);
+      if (uRing > 0.0) {
+        float c = cos(uTilt), sn = sin(uTilt);
+        vec2 rq = vec2(c * p.x + sn * p.y, -sn * p.x + c * p.y);
+        float front = step(rq.y, 0.0);
+        rq.y /= 0.3;
+        float rr = length(rq) / R, outer = 1.35 + uRing * 0.95;
+        float mk = smoothstep(1.22, 1.27, rr) * smoothstep(outer, outer - 0.06, rr) * (0.5 + 0.5 * sin(rr * 34.0 + uSeed));
+        float vis = mk * mix(1.0 - disc, 1.0, front) * 0.75;
+        col = mix(col, mix(uHigh, uPeak, 0.5) * 0.5, vis);
+        a = max(a, vis);
+      }
+      gl_FragColor = vec4(col * uAlpha, a * uAlpha);
+    }`,
+  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+  depthWrite: false, depthTest: false, transparent: true,
+});
+const globe = new THREE.Mesh(QUAD, globeMat);
+globe.frustumCulled = false; globe.visible = false; globe.renderOrder = 2.7;
+scene.add(globe);
+
+const SEA_DEEP = new THREE.Color(0.01, 0.04, 0.16), SEA_SHALLOW = new THREE.Color(0.04, 0.22, 0.36), SAND = new THREE.Color(0.55, 0.47, 0.3);
+const ROCK_HIGH = new THREE.Color(0.2, 0.17, 0.15), WHITE = new THREE.Color(1, 1, 1), SKY = new THREE.Color(0.25, 0.45, 1);
+function globeLook(p, u) {
+  const kind = planetKind(p), c = planetLook(p).c;
+  u.uKind.value = isSolid(p) ? 0 : 1; u.uSeed.value = p.seed % 100; u.uRing.value = p.rings; u.uTilt.value = ((p.seed % 7) - 3) * 0.14;
+  if (kind === 'ocean') {
+    u.uDeep.value.copy(c[0]).multiplyScalar(0.45); u.uShallow.value.copy(c[0]).lerp(SEA_SHALLOW, 0.5); u.uSand.value.copy(SAND);
+    u.uLow.value.copy(c[1]); u.uHigh.value.copy(ROCK_HIGH); u.uPeak.value.copy(WHITE); u.uAtm.value.copy(SKY);
+    u.uSnow.value = 0.68; u.uPolar.value = 0.6; u.uCloud.value = 0.6; u.uBase.value = SEA_MIN;
+  } else if (kind === 'rock') { // dry to begin with, but it will hold water if you give it some
+    u.uDeep.value.copy(SEA_DEEP); u.uShallow.value.copy(SEA_SHALLOW); u.uSand.value.copy(c[0]).lerp(c[1], 0.5);
+    u.uLow.value.copy(c[0]); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]).lerp(WHITE, 0.6); u.uAtm.value.copy(c[2]).multiplyScalar(0.25);
+    u.uSnow.value = 0.95; u.uPolar.value = p.seed % 3 ? 0.62 : 0.1; u.uCloud.value = 0; u.uBase.value = -0.2;
+  } else {
+    u.uLow.value.copy(c[0]); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]); u.uAtm.value.copy(c[1]).multiplyScalar(0.6);
+    u.uBands.value = kind === 'ice' ? 5 + (p.seed % 3) : 8 + (p.seed % 5); u.uCloud.value = 0; u.uWind.value = p.wind ?? 1;
+    u.uSpots.value.forEach((v, i) => { const s = p.spots[i]; if (s) v.set(s[0], s[1], s[2], s[3]); else v.set(0, 0, 0, 0); });
+  }
+}
+
+// The globe's orientation is the planet's frame seen from here. One open hand drags it round; left alone it turns on its axis.
+const globeQ = new THREE.Quaternion(), _gq = new THREE.Quaternion(), _gv = new THREE.Vector3(), _gm = new THREE.Matrix4();
+const AXIS_X = new THREE.Vector3(1, 0, 0), AXIS_Y = new THREE.Vector3(0, 1, 0), at = { lon: 0, lat: 0 };
+let globeR = 3.5, globeWx = 0, globeWy = 0, globeTouched = -10, globeBusy = -10;
+// the spot on the planet under a point on the screen (false if it misses, or we have not arrived yet)
+function globePoint(x, y) {
+  if (level !== 3 || E3 < 0.9 || zoomLock) return false;
+  const qx = x / globeR, qy = y / globeR, d2 = qx * qx + qy * qy;
+  if (d2 > 0.94) return false;
+  _gv.set(qx, qy, Math.sqrt(1 - d2)).applyQuaternion(_gq.copy(globeQ).invert());
+  at.lon = Math.atan2(_gv.x, _gv.z); at.lat = Math.asin(Math.max(-1, Math.min(1, _gv.y)));
+  return true;
+}
+function touched(now) { globeBusy = now; terrainDirty = true; markDirty(); }
+function dust(x, y, n, r, g, b) { for (let i = 0; i < n; i++) spawn(x + rnd(0.1), y + rnd(0.1), 0, rnd(0.8), rnd(0.8) + 0.3, 0, r, g, b, 0.3 + Math.random() * 0.5, 0.04 + Math.random() * 0.04); }
+
+// pinch: pull mountains up out of the ground, or on a giant, wind up a storm
+function planetPinch(hand, now, dt) {
+  const p = focusP, q = hand.pinchPt;
+  if (!p || now - hand.pinchAt < 0.15 || !globePoint(q.x, q.y)) return;
+  if (isSolid(p)) {
+    brush(at.lon, at.lat, 0.17, (k, d) => { const w = 1 - d * d; mapH[k] = clampH(mapH[k] + dt * 0.32 * w * w); });
+    dust(q.x, q.y, 2, 0.5, 0.45, 0.4);
+  } else {
+    if (!hand.spot) { hand.spot = [at.lon, at.lat, 0.03, 0]; p.spots.push(hand.spot); if (p.spots.length > SPOT_MAX) p.spots.shift(); }
+    hand.spot[2] = Math.min(0.42, hand.spot[2] + dt * 0.07);
+    dust(q.x, q.y, 1, 0.6, 0.4, 0.3);
+  }
+  touched(now);
+}
+// point: a fingertip run across the land leaves a river behind it
+function planetDraw(hand, now) {
+  const p = focusP, a = hand.prevTip, b = hand.tips[1];
+  if (!p || !isSolid(p)) return;
+  for (let s = 1; s <= 4; s++) {
+    if (!globePoint(a.x + (b.x - a.x) * s / 4, a.y + (b.y - a.y) * s / 4)) continue;
+    brush(at.lon, at.lat, 0.04, (k, d) => { const w = 1 - d; mapR[k] = Math.max(mapR[k], Math.min(1, w * 2.2)); mapH[k] = clampH(mapH[k] - 0.003 * w); });
+    touched(now);
+  }
+}
+// a supernova over the planet arrives as a meteor: the harder the fist was held, the bigger the crater
+function planetImpact(pt, power, now) {
+  const p = focusP;
+  if (!p || !globePoint(pt.x, pt.y)) return;
+  if (isSolid(p)) stampCrater(mapH, at.lon, at.lat, 0.07 + 0.2 * power, 0.14 + 0.3 * power);
+  else { p.spots.push([at.lon, at.lat, 0.05 + 0.12 * power, 1]); if (p.spots.length > SPOT_MAX) p.spots.shift(); }
+  touched(now);
+}
+// two fingertips: spread them to raise the sea (or whip up a giant's winds), close them to drain it
+function planetTide(d, now) {
+  const p = focusP;
+  if (!p || E3 < 0.9 || zoomLock) return;
+  if (!sculpt) sculpt = { tide: true, d };
+  const step = d - sculpt.d; sculpt.d = d;
+  if (isSolid(p)) p.sea = THREE.MathUtils.clamp(seaOf(p) + step * 0.06, SEA_MIN, SEA_MAX);
+  else p.wind = THREE.MathUtils.clamp((p.wind ?? 1) + step * 0.3, 0, 5);
+  if (step) touched(now);
+}
+function planetSpin(hand, now) {
+  if (level !== 3 || E3 < 0.9 || Math.hypot(hand.pos.x, hand.pos.y) > globeR * 1.3) return;
+  globeWx += (hand.vel.x / globeR - globeWx) * 0.25; globeWy += (hand.vel.y / globeR - globeWy) * 0.25;
+  globeTouched = now;
+}
+
+function updateGlobe(dt, now, px, py, radius, lx, ly) {
+  const p = focusP, u = globeMat.uniforms;
+  if (terrainOf !== p) { loadTerrain(p); globeQ.setFromAxisAngle(AXIS_X, 0.35); globeWx = globeWy = 0; }
+  if (now - globeTouched > 0.1) { const k = Math.exp(-2.5 * dt); globeWx *= k; globeWy *= k; }
+  globeQ.premultiply(_gq.setFromAxisAngle(AXIS_Y, globeWx * dt)).premultiply(_gq.setFromAxisAngle(AXIS_X, -globeWy * dt));
+  if (now - globeBusy > 1.5 && now - globeTouched > 1.5) globeQ.multiply(_gq.setFromAxisAngle(AXIS_Y, dt * 0.04)); // idling: it turns on its own axis
+  globeQ.normalize();
+  syncMap(false);
+  globeLook(p, u);
+  u.uRot.value.setFromMatrix4(_gm.makeRotationFromQuaternion(_gq.copy(globeQ).invert()));
+  u.uLight.value.set(lx * 0.75, ly * 0.75, 0.8).normalize();
+  u.uSea.value = isSolid(p) ? seaOf(p) : 0; u.uTime.value = bodyTime; u.uAlpha.value = Math.min(1, E3 * 4);
+  globe.visible = true; globe.position.set(px, py, 0); globe.scale.setScalar(radius * 5);
 }
 
 ambient.renderOrder = 0; particles.renderOrder = 2;
@@ -966,12 +1316,13 @@ function updateNebulae(dt, L, R) {
   const both = L.active && R.active && L.gesture === 'point' && R.gesture === 'point';
   const space = level === 0 ? 0 : level === 1 && focusG ? focusG.id : -1;
   if (nebula && nebula.space !== space) { nebula.held = false; nebula = null; }
-  if (sculpt && level !== 2) sculpt = null;
+  if (sculpt && (level < 2 || !!sculpt.tide !== (level === 3))) sculpt = null;
   if (both) {
     const a = L.tips[1], b = R.tips[1], d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
     const W = space === 0 ? 1 : gK; // world units per unit of this space
     const local = () => (space === 0 ? _w.set(mx, my, 0) : unplace(mx, my, _w));
-    if (level === 2) sculptPlanet(mx, my, d);
+    if (level === 3) planetTide(d, performance.now() / 1000);
+    else if (level === 2) sculptPlanet(mx, my, d);
     else if (!nebula && space >= 0 && d < T.nebulaTouch && !zoomLock) {
       local();
       nebula = addNebula(space, _w.x, _w.y, Math.atan2(b.y - a.y, b.x - a.x), T.nebulaMin / W, paletteIndex, (Math.random() * 3) | 0, Math.random() * 100);
@@ -1029,7 +1380,7 @@ class Hand {
     this.pinchPt = new THREE.Vector3(); this.prevTip = new THREE.Vector3();
     this.quat = new THREE.Quaternion(); this.hasQuat = false; this.grabInv = null; this.grabQ = new THREE.Quaternion();
     this.gesture = 'none'; this.cand = 'none'; this.candN = 0; this.lastSolid = 'none';
-    this.charge = 0; this.lastBurst = -10; this.lastPeace = -10; this.lastOpen = -10; this.pinchAt = null;
+    this.charge = 0; this.lastBurst = -10; this.lastPeace = -10; this.lastOpen = -10; this.pinchAt = null; this.spot = null;
     this.grab = null;   // the galaxy, star or planet this hand is pinching
     this.assist = null; // ...or one the other hand is pinching that this hand has joined in on
 
@@ -1042,6 +1393,7 @@ class Hand {
     this.dots = new THREE.Points(dotGeo, new THREE.PointsMaterial({
       size: 0.13, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthTest: false }));
     this.lines.frustumCulled = this.dots.frustumCulled = false;
+    this.lines.renderOrder = 5; this.dots.renderOrder = 5.1; // over everything, planets included, so you can see what you are touching
     this.lines.visible = this.dots.visible = false;
     scene.add(this.lines, this.dots);
   }
@@ -1080,6 +1432,10 @@ class Hand {
     this.joints.forEach((j, i) => dp.setXYZ(i, j.x, j.y, j.z));
     lp.needsUpdate = dp.needsUpdate = true;
     this.lines.material.color.copy(palette[0]); this.dots.material.color.copy(palette[1]);
+    // Glowing light vanishes against a bright planet, so down on one the hand is drawn as a solid, see-through overlay instead.
+    const solid = E3 > 0.5;
+    this.lines.material.blending = this.dots.material.blending = solid ? THREE.NormalBlending : THREE.AdditiveBlending;
+    this.lines.material.opacity = solid ? 0.6 : 0.55; this.dots.material.opacity = solid ? 0.75 : 0.9;
   }
 
   release() {
@@ -1114,7 +1470,7 @@ class Hand {
 
   act(now, dt, sculpting) {
     const g = this.gesture, p = this.pos;
-    if (g !== 'pinch') { this.release(); this.pinchAt = null; } else if (this.pinchAt == null) this.pinchAt = now;
+    if (g !== 'pinch') { this.release(); this.pinchAt = null; this.spot = null; } else if (this.pinchAt == null) this.pinchAt = now;
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
     if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
 
@@ -1124,6 +1480,7 @@ class Hand {
       if (this.charge >= T.minCharge) { burst(p, this.charge, this.vel); shatter(p, this.charge); this.lastBurst = now; }
       this.charge = 0;
       wells.push({ x: p.x, y: p.y, z: p.z, g: -7 });
+      planetSpin(this, now); // down on a planet, an open hand turns the globe
       { // streamers off every fingertip
         for (const t of this.tips) for (let k = 0; k < 5; k++) {
           _v.subVectors(t, p).normalize().multiplyScalar(1.5 + Math.random() * 2.5);
@@ -1138,6 +1495,8 @@ class Hand {
       wells.push({ x: p.x, y: p.y, z: p.z, g: 30 + 40 * this.charge, r0: 0.45 + 0.5 * this.charge, swirl: 12, strong: true, fist: true });
       pickColor(0.8); // hot core
       spawn(p.x + rnd(0.05), p.y + rnd(0.05), p.z, 0, 0, 0, cr * 0.4, cg * 0.4, cb * 0.4, 0.2, 0.3 + 0.6 * this.charge);
+    } else if (g === 'pinch' && level === 3) {
+      planetPinch(this, now, dt);
     } else if (g === 'pinch') {
       if (this.assist && !this.assist.held) this.assist = null; // the other hand let go: this one takes it over
       if (!this.grab && !this.assist && !zoomLock) {
@@ -1157,6 +1516,7 @@ class Hand {
       }
       if (this.grab) holdBody(this, this.grab, dt);
     } else if (g === 'point' && !sculpting) {
+      if (level === 3) planetDraw(this, now);
       const tip = this.tips[1], n = 14;
       for (let k = 0; k < n; k++) { // interpolate so fast strokes stay continuous
         _v.lerpVectors(this.prevTip, tip, k / n);
@@ -1306,24 +1666,36 @@ function note(msg, secs = 3.5) {
 }
 
 // the gesture guide and the "where am I" line change with the level
-const LEGEND = {
+const LEGEND = { // one line per level: universe, galaxy, solar system, a world with ground, a giant
   'fist open': ['<b>Fist</b>gather, then <b class="in">open</b> for a supernova; on a galaxy it destroys it',
     '<b>Fist</b>gather, then <b class="in">open</b> on a star to blow it up',
-    '<b>Fist</b>gather, then <b class="in">open</b> on a planet to smash it'],
+    '<b>Fist</b>gather, then <b class="in">open</b> on a planet to smash it',
+    '<b>Fist</b>gather, then <b class="in">open</b> on the planet for a meteor strike',
+    '<b>Fist</b>gather, then <b class="in">open</b> on the planet to scar its clouds'],
   pinch: ['<b>Pinch</b>hold to grow a galaxy, twist to tilt, or grab one',
     '<b>Pinch</b>hold to grow a star, or grab one',
-    '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit'],
+    '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit',
+    '<b>Pinch</b>hold on the planet to raise mountains',
+    '<b>Pinch</b>hold on the planet to brew a storm'],
   zoom: ['<b>Both hands open</b>together over a galaxy, then sweep apart to dive in',
     '<b>Both hands open</b>sweep apart over a star to visit, or together to leave',
-    '<b>Both hands open</b>sweep together to leave'],
+    '<b>Both hands open</b>sweep apart over a planet to land, or together to leave',
+    '<b>Open hand</b>spins the planet; sweep both hands together to leave',
+    '<b>Open hand</b>spins the planet; sweep both hands together to leave'],
+  point: ['<b>Point</b>draw with light', '<b>Point</b>draw with light', '<b>Point</b>draw with light',
+    '<b>Point</b>draw rivers across the land', '<b>Point</b>draw with light'],
   nebula: ['<b>Two fingertips</b>touch, then pull apart for a nebula',
     '<b>Two fingertips</b>touch, then pull apart for a dust cloud',
-    '<b>Two fingertips</b>touch on a planet, pull apart for rings, then moons'],
+    '<b>Two fingertips</b>touch on a planet, pull apart for rings, then moons',
+    '<b>Two fingertips</b>spread to raise the sea, close to drain it',
+    '<b>Two fingertips</b>spread for faster winds, close to calm them'],
 };
-const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to light a star.', 'A solar system. Pinch and hold to grow a planet.'];
+const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to light a star.', 'A solar system. Pinch and hold to grow a planet.',
+  'Pinch the land to raise mountains'];
 function refreshChrome() {
-  for (const k in LEGEND) if (chips[k]) chips[k].innerHTML = LEGEND[k][level];
-  whereEl.textContent = level === 0 ? 'Universe' : level === 1 ? 'Universe › Galaxy' : `Universe › Galaxy › ${focusS ? starName(focusS) : 'Star'}`;
+  const row = level < 3 ? level : focusP && !isSolid(focusP) ? 4 : 3;
+  for (const k in LEGEND) if (chips[k]) chips[k].innerHTML = LEGEND[k][row];
+  whereEl.textContent = level === 0 ? 'Universe' : level === 1 ? 'Universe › Galaxy' : `Universe › Galaxy › ${focusS ? starName(focusS) : 'Star'}${level === 3 && focusP ? ' › ' + planetName(focusP) : ''}`;
   upBtn.hidden = !entered || level === 0;
   savesBtn.hidden = !entered;
 }
@@ -1334,12 +1706,14 @@ window.addEventListener('keydown', e => { if ((e.key === 'b' || e.key === 'B' ||
 const SAVE_KEY = 'handiverse.universe.v1';
 function markDirty() { if (saveT <= 0) saveT = 1.5; }
 function snapshot() {
+  storeTerrain(); // fold the planet being worked on back into its record first
   const r = x => Math.round(x * 1e4) / 1e4;
   return { v: 1, nextId,
     galaxies: galaxies.filter(g => g.alive).map(g => ({ id: g.id, seed: g.seed, pal: g.pal, grow: r(g.grow),
       p: g.pos.toArray().map(r), q: g.quat.toArray().map(r),
       stars: g.stars.map(s => ({ u: r(s.u), v: r(s.v), grow: r(s.grow), seed: s.seed,
         planets: s.planets.map(p => ({ r: r(p.r), a: r(p.a), grow: r(p.grow), seed: p.seed, rings: r(p.rings),
+          map: p.map || undefined, sea: p.sea == null ? undefined : r(p.sea), wind: p.wind === 1 ? undefined : r(p.wind), spots: p.spots.length ? p.spots.map(q => q.map(r)) : undefined,
           moons: p.moons.map(m => ({ d: r(m.d), a: r(m.a), seed: m.seed })) })) })) })),
     nebulae: nebulae.map(n => ({ space: n.space, x: r(n.x), y: r(n.y), rot: r(n.rot), size: r(n.size), pal: n.pal, ci: n.ci, seed: r(n.seed) })) };
 }
@@ -1354,7 +1728,7 @@ function clearUniverse() {
   for (const g of galaxies) if (g.alive) killGalaxy(g);
   while (nebulae.length) dropNebula(nebulae[0]);
   nebula = null; sculpt = null; nextId = 1;
-  level = 0; depth = 0; zoomNudge = 0; zoomHeld = 0; zoomOn = false; zoomKey = null; zoomLock = false; focusG = focusS = null;
+  level = 0; depth = 0; zoomNudge = 0; zoomHeld = 0; zoomOn = false; zoomKey = null; zoomLock = false; focusG = focusS = focusP = null; terrainOf = null; terrainDirty = false;
 }
 function applySnapshot(d) {
   clearUniverse();
@@ -1365,7 +1739,8 @@ function applySnapshot(d) {
     g.id = s.id; g.seed = s.seed; g.pal = s.pal; g.grow = s.grow; g.pos.fromArray(s.p); g.quat.fromArray(s.q); g.vel.set(0, 0, 0);
     g.stars = (s.stars || []).map(a => {
       const st = mkStar(a.u, a.v, a.grow, a.seed);
-      st.planets = (a.planets || []).map(b => { const p = mkPlanet(b.r, b.a, b.grow, b.seed); p.rings = b.rings || 0; p.moons = (b.moons || []).map(m => ({ ...m })); return p; });
+      st.planets = (a.planets || []).map(b => { const p = mkPlanet(b.r, b.a, b.grow, b.seed); p.rings = b.rings || 0; p.moons = (b.moons || []).map(m => ({ ...m }));
+        p.map = b.map || null; p.sea = b.sea ?? null; p.wind = b.wind ?? 1; p.spots = (b.spots || []).map(q => [...q]); return p; });
       return st;
     });
     shapeGalaxy(g);
@@ -1590,7 +1965,8 @@ function frame() {
   updateZoom(L, R, now, dt);
 
   updateGalaxies(dt);
-  updateBodies(dt);
+  updateBodies(dt, now);
+  bloom.strength = 0.85 - 0.6 * E3; // close to a planet the glow would wash its surface out
   updateParticles(dt);
   updateAmbient(dt);
 
@@ -1621,7 +1997,8 @@ frame();
 // A handle for poking at things from the console. pose() stands in for the camera: call it every frame
 // with a hand's position and gesture and the rest of the game cannot tell the difference.
 window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, enter, surface, saveUniverse,
-  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; },
+  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, get globeR() { return globeR; }, globePoint, mapH,
+  get at() { return at; },
   pose(key, x, y, gesture, tipX = x, tipY = y) {
     const h = hands[key], fresh = !h.active;
     h.prevPos.copy(h.pos); h.pos.set(x, y, 0); h.hasJoints = false; h.pinchPt.set(x, y, 0);
