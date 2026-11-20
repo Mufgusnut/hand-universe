@@ -16,6 +16,7 @@ const T = {
   curled: 1.35,      // below this = finger curled
   pinchOn: 0.32,     // thumb-index distance / hand size to start a pinch
   pinchOff: 0.5,     // ...and to release it
+  pinchHold: 0.4,    // seconds a pinch must be held in empty space before it makes something new
   pointStraight: 0.88, // index finger straightness needed to count as pointing
   pointLead: 0.15,     // ...and how much straighter it must be than the other three fingers
   pinchIndexOpen: 0.6, // index straightness above which thumb-on-index is a pinch, not a fist
@@ -29,10 +30,12 @@ const T = {
   galaxyMax: 3.2,      // radius it reaches if the pinch is held the full time
   galaxyGrowTime: 6,   // seconds of holding to go from min to max
   tiltDepth: 2.5,      // how strongly tipping the hand toward/away from the camera tilts a held galaxy
-  portalDelay: 2.2,    // seconds after a supernova before two open hands may open a portal
   nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
+  zoomInStart: 9,      // two open hands must come at least this close together (world units) before sweeping apart dives in
+  zoomPull: 2.2,       // ...and how much further apart they must then sweep to commit to the dive
+  zoomOutMin: 6,       // two open hands must have been at least this far apart for sweeping them together to zoom out
   holdFrames: 2,     // frames a gesture must persist before it takes effect
 };
 
@@ -252,6 +255,11 @@ function updateAmbient(dt) {
   aGeo.attributes.aFade.needsUpdate = true;
 }
 
+// diving in or climbing out: the whole sky lurches outward or inward, then settles
+function warp(dir) {
+  for (let i = 0; i < ambN; i++) { const j = i * 3; aVel[j] += aPos[j] * 0.9 * dir; aVel[j + 1] += aPos[j + 1] * 0.9 * dir; }
+}
+
 // ---------------------------------------------------------------- effects
 function burst(p, power, vel) {
   const sp = 6 + 15 * power, gathered = 1.6 + 1.6 * power;
@@ -310,34 +318,38 @@ function ring(p, n, speed, whiten) {
 }
 
 // --- galaxies (GPU-animated, one draw call each; every galaxy is generated with its own shape and size)
-const GALAXY_N = 10000, GALAXY_LIFE = 45;
-const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
-const rand = (a, b) => a + Math.random() * (b - a);
+const GALAXY_N = 10000;
+// Shapes are drawn from a seeded generator, so a galaxy can be rebuilt exactly from its seed after a reload.
+const mulberry32 = a => () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+let rng = Math.random;
+const gauss = () => (rng() + rng() + rng() - 1.5) / 1.5;
+const rand = (a, b) => a + rng() * (b - a);
 const TAU = Math.PI * 2;
 
-function shapeGalaxy(g) {
-  const data = g.data, u = g.mat.uniforms;
-  const kind = ['spiral', 'spiral', 'spiral', 'barred', 'barred', 'ring', 'elliptical', 'irregular'][(Math.random() * 8) | 0];
-  const put = (i, r, ang, h, w = Math.random() * 0.96) => { const j = i * 4; data[j] = r; data[j + 1] = ang; data[j + 2] = h; data[j + 3] = w; };
+function shapeGalaxy(g, fresh = false) {
+  rng = mulberry32(g.seed);
+  const data = g.data, u = g.mat.uniforms, palette = PALETTES[g.pal % PALETTES.length].colors;
+  const kind = ['spiral', 'spiral', 'spiral', 'barred', 'barred', 'ring', 'elliptical', 'irregular'][(rng() * 8) | 0];
+  const put = (i, r, ang, h, w = rng() * 0.96) => { const j = i * 4; data[j] = r; data[j + 1] = ang; data[j + 2] = h; data[j + 3] = w; };
   // most arm stars sit in a tight lane, the rest form a soft haze around it
-  const lane = () => gauss() * (Math.random() < 0.65 ? 0.35 : 1.25);
+  const lane = () => gauss() * (rng() < 0.65 ? 0.35 : 1.25);
   // star-forming knots: small bright clumps strung along the arms
   const knots = (armAngle, rMin) => {
-    const list = Array.from({ length: 10 + ((Math.random() * 10) | 0) }, () => { const r = rand(rMin, 0.95); return { r, a: armAngle(r, (Math.random() * 8) | 0) }; });
-    return i => { const k = list[(Math.random() * list.length) | 0], x = k.r * Math.cos(k.a) + gauss() * 0.022, z = k.r * Math.sin(k.a) + gauss() * 0.022;
+    const list = Array.from({ length: 10 + ((rng() * 10) | 0) }, () => { const r = rand(rMin, 0.95); return { r, a: armAngle(r, (rng() * 8) | 0) }; });
+    return i => { const k = list[(rng() * list.length) | 0], x = k.r * Math.cos(k.a) + gauss() * 0.022, z = k.r * Math.sin(k.a) + gauss() * 0.022;
       put(i, Math.hypot(x, z), Math.atan2(z, x), gauss() * 0.015, rand(0.9, 1)); };
   };
   let rigid = 0.35, diff = 0.25, squash = 1, maxScale = rand(0.9, 3.2);
 
   if (kind === 'spiral') {
-    const arms = 2 + ((Math.random() * 4) | 0), twist = rand(2.5, 7), spread = rand(0.2, 0.55);
+    const arms = 2 + ((rng() * 4) | 0), twist = rand(2.5, 7), spread = rand(0.2, 0.55);
     const bulge = rand(0.08, 0.22), bulgeR = rand(0.1, 0.22);
     const knot = knots((r, n) => ((n % arms) / arms) * TAU + r * twist, 0.2);
     for (let i = 0; i < GALAXY_N; i++) {
-      const v = Math.random();
-      if (v < bulge) { put(i, Math.pow(Math.random(), 1.6) * bulgeR, rand(0, TAU), gauss() * 0.06); continue; }
+      const v = rng();
+      if (v < bulge) { put(i, Math.pow(rng(), 1.6) * bulgeR, rand(0, TAU), gauss() * 0.06); continue; }
       if (v > 0.93) { knot(i); continue; }
-      const r = 0.05 + Math.pow(Math.random(), 1.4) * 0.95;
+      const r = 0.05 + Math.pow(rng(), 1.4) * 0.95;
       put(i, r, ((i % arms) / arms) * TAU + r * twist + lane() * spread * (1 - r * 0.5), gauss() * 0.03);
     }
   } else if (kind === 'barred') {
@@ -345,45 +357,46 @@ function shapeGalaxy(g) {
     rigid = 0.5; diff = 0.04; // turns almost rigidly so the bar holds together
     const knot = knots((r, n) => (n % 2) * Math.PI + (r - bar) * twist, bar);
     for (let i = 0; i < GALAXY_N; i++) {
-      const v = Math.random(), side = (i % 2) * Math.PI;
+      const v = rng(), side = (i % 2) * Math.PI;
       if (v > 0.94) { knot(i); continue; }
-      if (v < 0.12) put(i, Math.random() * 0.12, rand(0, TAU), gauss() * 0.06);
-      else if (v < 0.42) { const r = Math.random() * bar, w = gauss() * 0.05; put(i, Math.hypot(r, w), side + Math.atan2(w, r), gauss() * 0.03); }
-      else { const r = bar + Math.pow(Math.random(), 1.3) * (1 - bar); put(i, r, side + (r - bar) * twist + lane() * 0.3, gauss() * 0.03); }
+      if (v < 0.12) put(i, rng() * 0.12, rand(0, TAU), gauss() * 0.06);
+      else if (v < 0.42) { const r = rng() * bar, w = gauss() * 0.05; put(i, Math.hypot(r, w), side + Math.atan2(w, r), gauss() * 0.03); }
+      else { const r = bar + Math.pow(rng(), 1.3) * (1 - bar); put(i, r, side + (r - bar) * twist + lane() * 0.3, gauss() * 0.03); }
     }
   } else if (kind === 'ring') {
     const ringR = rand(0.6, 0.85), width = rand(0.04, 0.09);
     for (let i = 0; i < GALAXY_N; i++) {
-      const v = Math.random();
-      if (v < 0.2) put(i, Math.random() * 0.15, rand(0, TAU), gauss() * 0.06);
+      const v = rng();
+      if (v < 0.2) put(i, rng() * 0.15, rand(0, TAU), gauss() * 0.06);
       else if (v < 0.82) put(i, ringR + gauss() * width, rand(0, TAU), gauss() * 0.03);
-      else put(i, Math.random() * ringR, rand(0, TAU), gauss() * 0.03);
+      else put(i, rng() * ringR, rand(0, TAU), gauss() * 0.03);
     }
   } else if (kind === 'elliptical') {
     rigid = 0.18; diff = 0.1; squash = rand(0.5, 0.9); maxScale = rand(0.8, 2.3);
-    for (let i = 0; i < GALAXY_N; i++) { const r = Math.pow(Math.random(), 2.2); put(i, r, rand(0, TAU), gauss() * 0.3 * (1 - r * 0.7)); }
+    for (let i = 0; i < GALAXY_N; i++) { const r = Math.pow(rng(), 2.2); put(i, r, rand(0, TAU), gauss() * 0.3 * (1 - r * 0.7)); }
   } else { // irregular: a handful of ragged clumps
     rigid = 0.28; diff = 0.05; squash = rand(0.7, 1); maxScale = rand(0.8, 2.3);
-    const clumps = Array.from({ length: 3 + ((Math.random() * 4) | 0) }, () => ({ r: rand(0.1, 0.7), a: rand(0, TAU), s: rand(0.08, 0.25) }));
+    const clumps = Array.from({ length: 3 + ((rng() * 4) | 0) }, () => ({ r: rand(0.1, 0.7), a: rand(0, TAU), s: rand(0.08, 0.25) }));
     for (let i = 0; i < GALAXY_N; i++) {
-      if (Math.random() < 0.3) { put(i, Math.pow(Math.random(), 1.5) * 0.9, rand(0, TAU), gauss() * 0.08); continue; }
-      const c = clumps[(Math.random() * clumps.length) | 0];
+      if (rng() < 0.3) { put(i, Math.pow(rng(), 1.5) * 0.9, rand(0, TAU), gauss() * 0.08); continue; }
+      const c = clumps[(rng() * clumps.length) | 0];
       const x = c.r * Math.cos(c.a) + gauss() * c.s, z = c.r * Math.sin(c.a) + gauss() * c.s;
       put(i, Math.hypot(x, z), Math.atan2(z, x), gauss() * 0.08);
     }
   }
   g.geo.attributes.aData.needsUpdate = true;
 
-  const spin = (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.5);
+  const spin = (rng() < 0.5 ? -1 : 1) * rand(0.7, 1.5);
   u.uRigid.value = rigid * spin; u.uDiff.value = diff * spin; u.uSquash.value = squash;
-  g.maxScale = maxScale; g.growTime = rand(1.0, 2.4);
-  g.points.rotation.set(rand(0.35, 1.35), 0, rand(-0.9, 0.9)); // from nearly edge-on to nearly face-on
+  const tilt = rand(0.35, 1.35), roll = rand(-0.9, 0.9); // from nearly edge-on to nearly face-on
+  if (fresh) g.quat.setFromEuler(new THREE.Euler(tilt, 0, roll));
   if (kind === 'elliptical') { u.uA.value.setRGB(1, 0.72, 0.42); u.uB.value.setRGB(1, 0.9, 0.7); }
   else {
-    const a = (Math.random() * palette.length) | 0, b = (a + 1 + ((Math.random() * (palette.length - 1)) | 0)) % palette.length;
+    const a = (rng() * palette.length) | 0, b = (a + 1 + ((rng() * (palette.length - 1)) | 0)) % palette.length;
     u.uA.value.copy(palette[a]); u.uB.value.copy(palette[b]);
   }
   u.uCore.value.setRGB(1, rand(0.82, 0.97), rand(0.6, 0.95));
+  rng = Math.random;
 }
 
 function makeGalaxy() {
@@ -416,178 +429,467 @@ function makeGalaxy() {
   const points = new THREE.Points(geo, mat);
   points.frustumCulled = false; points.visible = false; points.renderOrder = 2;
   scene.add(points);
-  return { points, mat, geo, data, alive: false, held: false, growing: false, age: 0, grow: 0, swallow: 0,
-    maxScale: 2, growTime: 1.6, radius: 0.25, vel: new THREE.Vector3() };
+  // pos and quat are where the galaxy sits in the universe; the drawn points leave them while we dive inside it
+  return { kind: 'galaxy', points, mat, geo, data, alive: false, held: false, growing: false, isNew: false, holder: null,
+    id: 0, seed: 0, pal: 0, stars: [], grow: 0, swallow: 0, radius: 0.25, wx: 0, wy: 0, reach: 0,
+    pos: new THREE.Vector3(), quat: new THREE.Quaternion(), vel: new THREE.Vector3() };
 }
-const galaxies = Array.from({ length: 6 }, makeGalaxy);
+const GALAXY_MAX = 8;
+const galaxies = Array.from({ length: GALAXY_MAX }, makeGalaxy);
+let nextId = 1;
 
 function acquireGalaxy(p) {
-  let g = galaxies.find(x => !x.alive);
-  if (!g) g = galaxies.filter(x => !x.held).sort((a, b) => b.age - a.age)[0];
-  if (!g) return null;
-  shapeGalaxy(g);
-  g.alive = true; g.held = true; g.growing = true; g.age = 0; g.grow = 0; g.swallow = 0; g.vel.set(0, 0, 0);
-  g.points.visible = true; g.points.position.copy(p);
+  const g = galaxies.find(x => !x.alive);
+  if (!g) { note('The universe is full. Set off a supernova on a galaxy to clear it away.'); return null; }
+  g.id = nextId++; g.seed = (Math.random() * 4294967296) >>> 0; g.pal = paletteIndex; g.stars = [];
+  shapeGalaxy(g, true);
+  g.alive = true; g.held = true; g.growing = true; g.isNew = true; g.grow = 0; g.swallow = 0; g.vel.set(0, 0, 0);
+  g.pos.copy(p); g.wx = p.x; g.wy = p.y; g.reach = T.grabRadius; g.radius = T.galaxyMin;
   return g;
 }
 
-// A pinch picks up whatever galaxy is under or near it (the target is generous) and only makes a new one
-// in empty space. A galaxy whose holder has stopped being tracked can be taken over, so a hand that the
-// tracker briefly loses or relabels carries on holding the same galaxy instead of spawning another.
-function pinchGalaxy(p, hand, now) {
-  let best = null, bestD = Infinity, blocked = false;
-  for (const g of galaxies) {
-    if (!g.alive || g.swallow > 0) continue;
-    const d = Math.hypot(g.points.position.x - p.x, g.points.position.y - p.y);
-    if (d >= Math.max(T.grabRadius, g.radius + 1)) continue;
-    const busy = g.held && g.holder && g.holder !== hand && g.holder.gesture === 'pinch' && now - g.holder.lastSeen < 0.15;
-    if (busy) { blocked = true; continue; } // the other hand really is holding it
-    if (d < bestD) { best = g; bestD = d; }
+// A pinch picks up whatever is under or near it (the target is generous) and only makes something new in
+// empty space. A thing whose holder has stopped being tracked can be taken over, so a hand that the tracker
+// briefly loses or relabels carries on holding it. If the other hand really is holding it, this hand joins
+// in rather than making a second thing right on top of it.
+function pinchPick(list, p, hand, now, create) {
+  let best = null, bestD = Infinity, shared = null;
+  for (const o of list) {
+    if (o.swallow > 0) continue;
+    const d = Math.hypot(o.wx - p.x, o.wy - p.y);
+    const busy = o.held && o.holder && o.holder !== hand && o.holder.gesture === 'pinch' && now - o.holder.lastSeen < 0.15;
+    if (busy) { if (d < o.reach * 1.6) shared = o; continue; }
+    if (d < o.reach && d < bestD) { best = o; bestD = d; }
   }
+  if (shared) { hand.assist = shared; return null; }
   if (best) {
-    if (best.holder && best.holder !== hand && best.holder.galaxy === best) best.holder.galaxy = null;
+    if (best.holder && best.holder !== hand && best.holder.grab === best) best.holder.grab = null;
     if (!best.held) best.growing = false;
-    best.held = true; best.age = 0; best.vel.set(0, 0, 0);
-  } else if (!blocked) best = acquireGalaxy(p);
+    best.held = true;
+    if (best.vel) best.vel.set(0, 0, 0);
+  } else best = create();
   if (best) best.holder = hand;
   return best;
 }
 
-function killGalaxy(g) { if (g.holder && g.holder.galaxy === g) g.holder.galaxy = null; g.holder = null; g.alive = false; g.held = false; g.swallow = 0; g.points.visible = false; }
+function killGalaxy(g) {
+  if (g.holder && g.holder.grab === g) g.holder.grab = null;
+  for (let i = nebulae.length - 1; i >= 0; i--) if (nebulae[i].space === g.id) dropNebula(nebulae[i]);
+  if (focusG === g) { focusG = null; focusS = null; }
+  g.holder = null; g.alive = false; g.held = false; g.swallow = 0; g.stars = []; g.points.visible = false;
+  markDirty();
+}
 
 function updateGalaxies(dt) {
+  const hw = viewW * 0.5, hh = viewH * 0.5;
   for (const g of galaxies) {
-    if (!g.alive) continue;
-    g.age += dt;
-    if (g.held) { g.age = 0; if (g.growing) g.grow += dt; }
-    else {
-      g.points.position.addScaledVector(g.vel, dt);
+    if (!g.alive) { g.points.visible = false; continue; }
+    if (g.held) { if (g.growing) g.grow += dt; }
+    else if (level === 0) {
+      g.pos.addScaledVector(g.vel, dt);
       g.vel.multiplyScalar(Math.exp(-0.6 * dt));
-      if (g.age > GALAXY_LIFE) { killGalaxy(g); continue; }
+      // nothing lasts 45 seconds and fades any more, so a thrown galaxy has to stay where it can be reached
+      g.pos.x = THREE.MathUtils.clamp(g.pos.x, -hw, hw); g.pos.y = THREE.MathUtils.clamp(g.pos.y, -hh, hh);
     }
     const t = Math.min(1, g.grow / T.galaxyGrowTime);
     g.radius = T.galaxyMin + (T.galaxyMax - T.galaxyMin) * (1 - (1 - t) * (1 - t)); // quick at first, easing into the maximum
-    const scale = g.radius * Math.max(0.02, 1 - g.swallow);
+    g.wx = g.pos.x; g.wy = g.pos.y; g.reach = Math.max(T.grabRadius, g.radius + 1);
+    const focus = g === focusG && E1 > 0;
+    let scale = g.radius;
+    if (focus) { // the galaxy we are diving into swings face-on and grows until it is the whole sky
+      place(0, 0, _w);
+      g.points.position.set(_w.x, _w.y, THREE.MathUtils.lerp(g.pos.z, C0.z, E1));
+      g.points.quaternion.slerpQuaternions(g.quat, FACE, E1);
+      scale = gK * zM;
+    } else { g.points.position.copy(g.pos); g.points.quaternion.copy(g.quat); }
+    scale *= Math.max(0.02, 1 - g.swallow);
     g.points.scale.setScalar(scale);
-    g.mat.uniforms.uSize.value = 0.2 + scale * 0.62;
-    g.mat.uniforms.uTime.value += dt * (g.held && g.growing ? 2.2 : 1) * (1 + g.swallow * 7);
-    const fadeIn = Math.min(1, g.grow * 3), fadeOut = g.held ? 1 : Math.min(1, (GALAXY_LIFE - g.age) / 3);
+    g.mat.uniforms.uSize.value = 0.2 + Math.min(scale, 3.2) * 0.62 + Math.max(0, scale - 3.2) * 0.1;
+    g.mat.uniforms.uTime.value += dt * (g.held && g.growing ? 2.2 : 1) * (1 + g.swallow * 7) * (focus ? 1 - 0.92 * E1 : 1);
+    const fadeIn = Math.min(1, g.grow * 3);
     const density = Math.min(1, 0.2 + 0.22 * scale * scale); // same star count in less area would burn out
-    g.mat.uniforms.uAlpha.value = fadeIn * fadeOut * density * (g.held && !g.growing ? 1.3 : 1);
+    const seen = focus ? (1 - 0.3 * E1) * (1 - 0.6 * E2) : 1 - E1;
+    const alpha = fadeIn * density * (g.held && !g.growing ? 1.3 : 1) * seen;
+    g.mat.uniforms.uAlpha.value = alpha;
+    g.points.visible = alpha > 0.003;
   }
 }
 
-// --- portal: an opaque window into somewhere else, ringed with energy
-ambient.renderOrder = 0; particles.renderOrder = 2;
-const portalMat = new THREE.ShaderMaterial({
-  uniforms: { uTime: { value: 0 }, uOpen: { value: 0 }, uPulse: { value: 0 },
-    uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() }, uC: { value: new THREE.Color() } },
-  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragmentShader: /* glsl */`
-    varying vec2 vUv; uniform float uTime, uOpen, uPulse; uniform vec3 uA, uB, uC;
-    float hash1(float n){ return fract(sin(n) * 43758.5453); }
-    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-    float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
-      return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
-    float fbm(vec2 p){ float v = 0.0, a = 0.5; for(int i=0;i<5;i++){ v += a*noise(p); p = p*2.03 + 17.0; a *= 0.5; } return v; }
-    void main(){
-      vec2 p = (vUv - 0.5) * 3.4;            // rim sits at r = 1
-      float r = length(p), a = atan(p.y, p.x);
-      float inside = smoothstep(1.0, 0.965, r);
+// ---------------------------------------------------------------- levels
+// Three scales of the same place: the universe (0), the inside of one galaxy (1) and one star's solar
+// system (2). `depth` eases toward the level we are on, and is nudged a little by a two-handed sweep that
+// is under way, so the view starts answering the hands before the dive commits.
+const C0 = new THREE.Vector3(0, 0, -1), FACE = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
+const SYSTEM_ZOOM = 5;
+let level = 0, depth = 0, E1 = 0, E2 = 0, focusG = null, focusS = null;
+let zoomNudge = 0, zoomLock = false, zoomKey = null, zoomOn = false, zoomMin = 0, zoomMax = 0, zoomGap = 0, zoomHeld = 0, zoomShow = false;
+let galS = 9, sysR = 4.8, gK = 1, zM = 1, zPx = 0, zPy = 0, bodyTime = 0;
+const gO = new THREE.Vector3(), _w = new THREE.Vector3();
+const ease = t => t * t * (3 - 2 * t), clamp01 = t => Math.min(1, Math.max(0, t));
 
-      // faint nebula swirling down the throat
-      float sw = a + uTime * 0.6 + 2.6 * log(r + 0.06);
-      float n = fbm(vec2(cos(sw), sin(sw)) * 1.6 + (0.9 / (r + 0.2) + uTime * 0.5) * vec2(0.8, 0.6));
-      vec3 col = mix(uC, uA, smoothstep(0.1, 1.0, r)) * pow(n, 2.4) * 0.3;
+function updateView(dt) {
+  galS = Math.max(viewW, viewH) * 0.5;  // how big a galaxy's disc is drawn once we are inside it
+  sysR = Math.min(viewW, viewH) * 0.47; // the widest orbit that still fits on screen
+  if (level === 2 && !focusS) setLevel(1);
+  if (level >= 1 && !focusG) setLevel(0);
+  const target = level + zoomNudge;
+  depth += (target - depth) * Math.min(1, dt * 3);
+  if (Math.abs(target - depth) < 0.0015) depth = target;
+  E1 = ease(clamp01(depth)); E2 = ease(clamp01(depth - 1));
+  if (level < 2 && E2 === 0 && zoomKey !== focusS) focusS = null;
+  if (level < 1 && E1 === 0 && zoomKey !== focusG) focusG = null;
+  if (focusG) { gO.lerpVectors(focusG.pos, C0, E1); gK = focusG.radius * Math.pow(galS / focusG.radius, E1); }
+  zM = Math.pow(SYSTEM_ZOOM, E2);
+  if (focusS) { zPx = gO.x + focusS.u * gK; zPy = gO.y + focusS.v * gK; }
+  bodyTime += dt;
+}
 
-      // stars streaking out of the centre at warp speed
-      float an = a / 6.2831853 + 0.5;
-      for (int i = 0; i < 2; i++) {
-        float fi = float(i), cells = 36.0 + 22.0 * fi;
-        float c = an * cells;
-        float id = mod(floor(c), cells), f = fract(c) - 0.5;
-        float rnd = hash1(id * 17.3 + fi * 91.7), rnd2 = hash1(id * 5.1 + fi * 13.3);
-        float s = fract(rnd + uTime * (0.18 + 0.3 * rnd2));
-        float rs = s * s * 1.05, len = 0.02 + 0.28 * s;
-        float along = smoothstep(rs - len, rs, r) * smoothstep(rs + 0.015, rs, r);
-        float across = smoothstep(0.5, 0.0, abs(f) * (1.0 + 6.0 * (1.0 - rnd2)));
-        col += mix(vec3(1.0), mix(uA, uB, rnd), 0.55) * along * across * across * (0.15 + 0.5 * s);
+// galaxy coordinates (in units of the galaxy's radius) <-> the screen's world coordinates
+function place(u, v, out) {
+  let x = gO.x + u * gK, y = gO.y + v * gK;
+  if (E2 > 0) { x = (x - zPx) * zM + zPx * (1 - E2); y = (y - zPy) * zM + zPy * (1 - E2); }
+  out.x = x; out.y = y; return out;
+}
+function unplace(x, y, out) {
+  if (E2 > 0) { x = (x - zPx * (1 - E2)) / zM + zPx; y = (y - zPy * (1 - E2)) / zM + zPy; }
+  out.x = (x - gO.x) / gK; out.y = (y - gO.y) / gK; return out;
+}
+
+function setLevel(n) { level = n; zoomLock = true; zoomKey = null; zoomOn = false; zoomHeld = 0; refreshChrome(); note(ARRIVE[n], 6); }
+
+function diveInto(o) {
+  for (const h of [hands.Left, hands.Right]) h.release();
+  if (o.kind === 'galaxy') { o.vel.set(0, 0, 0); focusG = o; setLevel(1); }
+  else { focusS = o; setLevel(2); }
+  warp(1);
+}
+
+function surface() {
+  if (level === 0) return;
+  for (const h of [hands.Left, hands.Right]) { // anything a hand had only just begun making is dropped
+    const o = h.grab, raw = o && o.isNew && o.grow < 3;
+    h.release();
+    if (raw) removeBody(o);
+  }
+  setLevel(level - 1);
+  warp(-1);
+}
+
+// Two open hands are the zoom control, like a swimmer's breaststroke. Bring them together over a galaxy
+// or a star and sweep them apart: dive into it. Start wide and sweep them together over open space: climb
+// back out. It is the sweep that counts, not the pose, so two open hands held still do nothing at all.
+function zoomTarget(x, y, loose) {
+  const list = level === 0 ? galaxies : level === 1 && focusG ? focusG.stars : null;
+  let best = null, bd = Infinity;
+  if (list) for (const o of list) {
+    if (o.kind === 'galaxy' && !o.alive) continue;
+    const d = Math.hypot(o.wx - x, o.wy - y);
+    if (d < (loose ? Math.max(3.5, o.reach * 1.6) : o.reach) && d < bd) { best = o; bd = d; }
+  }
+  return best;
+}
+function updateZoom(L, R, now, dt) {
+  const fresh = Math.max(L.charge, R.charge) >= T.minCharge || now - Math.max(L.lastBurst, R.lastBurst) < 1.2; // that is a supernova, not a stroke
+  // A hand sweeping sideways is seen edge-on and stops reading as cleanly open, so one that was open a moment ago
+  // and has not become anything else still counts, and a brief dropout does not throw the stroke away.
+  const openish = h => h.active && (h.gesture === 'open' || (h.gesture === 'none' && now - h.lastOpen < 1));
+  const both = openish(L) && openish(R) && (L.gesture === 'open' || R.gesture === 'open' || zoomOn) && !fresh;
+  let nudge = zoomHeld;
+  if (!both) {
+    if (!zoomOn || fresh || (zoomGap += dt) > 0.4) { zoomOn = false; zoomKey = null; nudge = 0; if (Math.abs(depth - level) < 0.04) zoomLock = false; }
+  } else if (!zoomLock) {
+    zoomGap = 0; nudge = 0;
+    const d = Math.hypot(L.pos.x - R.pos.x, L.pos.y - R.pos.y), mx = (L.pos.x + R.pos.x) / 2, my = (L.pos.y + R.pos.y) / 2;
+    if (!zoomOn) { zoomOn = true; zoomMin = zoomMax = d; zoomKey = null; }
+    zoomMax = Math.max(zoomMax, d);
+    // the stroke outward is measured from where the hands were closest, and aims at whatever lay between them then
+    if (d <= zoomMin) { zoomMin = d; zoomKey = null; }
+    if (!zoomKey && zoomMin < T.zoomInStart && d - zoomMin < T.zoomPull * 0.6) zoomKey = zoomTarget(mx, my, true); // generous: the nearest thing roughly between the hands
+    const o = zoomKey, isG = o && o.kind === 'galaxy';
+    const free = o && (isG ? (!focusG || focusG === o || depth < 0.02) : (!focusS || focusS === o || depth < 1.02));
+    const inward = free ? clamp01((d - zoomMin) / T.zoomPull) : 0;
+    // ...and the stroke inward from where they were widest, but only over open space, so that closing the
+    // hands over a star to dive into it is never mistaken for leaving
+    const outward = level > 0 && zoomMax > T.zoomOutMin && !zoomTarget(mx, my) ? clamp01((zoomMax - d) / (zoomMax * 0.5)) : 0;
+    if (inward > 0) {
+      if (isG) focusG = o; else focusS = o;
+      nudge = inward * 0.25;
+      if (inward >= 1) { diveInto(o); nudge = 0; }
+    } else if (outward > 0) {
+      nudge = -outward * 0.25;
+      if (outward >= 1) { surface(); nudge = 0; }
+    }
+  }
+  zoomHeld = nudge; zoomShow = nudge !== 0;
+  zoomNudge += (nudge - zoomNudge) * Math.min(1, dt * 10);
+}
+
+// ---------------------------------------------------------------- stars and planets
+const STAR_MAX = 16, STAR_GROW = 6, PLANET_MAX = 8, PLANET_GROW = 6, MOON_MAX = 4;
+const newSeed = () => (Math.random() * 1e9) | 0;
+const mkStar = (u, v, grow, seed) => ({ kind: 'star', u, v, grow, seed, planets: [],
+  held: false, growing: false, isNew: false, holder: null, swallow: 0, wx: 0, wy: 0, wr: 0.1, reach: 1.4 });
+const mkPlanet = (r, a, grow, seed) => ({ kind: 'planet', r, a, grow, seed, rings: 0, moons: [],
+  held: false, growing: false, isNew: false, holder: null, swallow: 0, wx: 0, wy: 0, reach: 1.1 });
+
+const starT = s => Math.min(1, s.grow / STAR_GROW);
+const starRadius = s => 0.07 + 0.3 * Math.pow(starT(s), 0.8); // seen from inside its galaxy
+const sunRadius = s => sysR * (0.075 + 0.075 * starT(s));       // seen from inside its own system
+const orbitMin = s => 0.17 + 0.08 * starT(s);                 // nearest orbit, as a fraction of sysR
+const starName = s => { const t = starT(s); return t < 0.2 ? 'Red dwarf' : t < 0.4 ? 'Orange dwarf' : t < 0.62 ? 'Yellow star' : t < 0.85 ? 'White star' : 'Blue giant'; };
+const STAR_RAMP = [[1, 0.3, 0.16], [1, 0.52, 0.22], [1, 0.84, 0.48], [1, 0.97, 0.92], [0.6, 0.75, 1]];
+function starColor(t, out) {
+  const x = t * (STAR_RAMP.length - 1), i = Math.min(STAR_RAMP.length - 2, x | 0), f = x - i, a = STAR_RAMP[i], b = STAR_RAMP[i + 1];
+  return out.setRGB(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f);
+}
+
+const planetT = p => Math.min(1, p.grow / PLANET_GROW);
+const planetRadius = p => sysR * (0.016 + 0.068 * Math.pow(planetT(p), 1.2));
+const planetName = p => { const t = planetT(p); return t < 0.3 ? 'Rocky world' : t < 0.55 ? 'Ocean world' : t < 0.78 ? 'Ice giant' : 'Gas giant'; };
+const hexes = rows => rows.map(r => r.map(c => new THREE.Color(c)));
+const ROCKS = hexes([['#5c5148', '#8a7a6a', '#b9b0a5'], ['#6b3a26', '#a85a36', '#d9a27a'], ['#4a4a52', '#77777f', '#b5b5c0'], ['#3d3326', '#7d6a45', '#c9b47f']]);
+const WORLDS = hexes([['#12408f', '#3f8f4a', '#ffffff'], ['#0f4f8a', '#b89a5a', '#f2f6ff'], ['#1a5a6a', '#7fae5a', '#ffffff'], ['#1b3a9a', '#5a9a6a', '#eef4ff']]);
+const ICES = hexes([['#2f6fb0', '#7fd0e6', '#d9f6ff'], ['#3a4fc0', '#6fa0ff', '#cfe0ff'], ['#2a8f8f', '#8fe6d0', '#e6fff6']]);
+const GASES = hexes([['#8a5a32', '#e0b888', '#fff0d8'], ['#a0522d', '#f0c27a', '#ffe6b0'], ['#6a4a7a', '#d09ac0', '#ffe0f0'], ['#7a6a3a', '#e6d28a', '#fffbe0']]);
+function planetLook(p) {
+  const t = planetT(p), set = t < 0.3 ? ROCKS : t < 0.55 ? WORLDS : t < 0.78 ? ICES : GASES;
+  return { c: set[p.seed % set.length], gas: t < 0.55 ? 0 : 1, cloud: t < 0.3 ? 0.12 : 0.8 };
+}
+const moonLook = m => ({ c: ROCKS[m.seed % ROCKS.length], gas: 0, cloud: 0.1 });
+
+function newStar(p) {
+  if (focusG.stars.length >= STAR_MAX) { note('This galaxy has all the stars it can hold. A supernova will clear one away.'); return null; }
+  unplace(p.x, p.y, _w);
+  const s = mkStar(_w.x, _w.y, 0, newSeed());
+  s.held = s.growing = s.isNew = true; s.wx = p.x; s.wy = p.y;
+  focusG.stars.push(s);
+  return s;
+}
+function newPlanet(p) {
+  const d = Math.hypot(p.x, p.y);
+  if (d < sunRadius(focusS) * 0.9) return null; // not inside the sun
+  if (focusS.planets.length >= PLANET_MAX) { note('This star has all the planets it can hold. A supernova will smash one.'); return null; }
+  const o = mkPlanet(THREE.MathUtils.clamp(d / sysR, orbitMin(focusS), 1), Math.atan2(p.y, p.x), 0, newSeed());
+  o.held = o.growing = o.isNew = true; o.wx = p.x; o.wy = p.y;
+  focusS.planets.push(o);
+  return o;
+}
+function removeBody(o) {
+  if (o.holder && o.holder.grab === o) o.holder.grab = null;
+  o.holder = null; o.held = false;
+  if (o.kind === 'galaxy') return killGalaxy(o);
+  const list = o.kind === 'star' ? focusG?.stars : focusS?.planets, i = list ? list.indexOf(o) : -1;
+  if (i >= 0) list.splice(i, 1);
+  if (focusS === o) focusS = null;
+  markDirty();
+}
+const inCloud = s => nebulae.some(n => n.space === focusG.id && Math.hypot(n.x - s.u, n.y - s.v) < n.size * 0.6);
+
+// what a pinching hand does, every frame, to the thing it is holding
+function holdBody(hand, o, dt) {
+  const q = hand.pinchPt;
+  if (o.kind === 'galaxy') {
+    o.pos.lerp(q, Math.min(1, dt * (o.growing ? 14 : 7)));
+    if (hand.grabInv && hand.hasQuat) { // the galaxy turns with the hand
+      _q.copy(hand.quat).multiply(hand.grabInv).multiply(hand.grabQ);
+      o.quat.slerp(_q, Math.min(1, dt * 10));
+    }
+    wells.push({ x: q.x, y: q.y, z: q.z, g: 6, r0: o.radius * 0.9, swirl: 5, range: 2 + o.radius * 1.5 }); // nearby stars fall into orbit
+  } else if (o.kind === 'star') {
+    const k = Math.min(1, dt * 12);
+    unplace(q.x, q.y, _w);
+    o.u += (_w.x - o.u) * k; o.v += (_w.y - o.v) * k;
+    if (o.growing) o.grow = Math.min(STAR_GROW, o.grow + dt * (inCloud(o) ? 2 : 1)); // a dust cloud feeds it twice as fast
+    wells.push({ x: q.x, y: q.y, z: 0, g: 5, r0: o.wr + 0.35, swirl: 5, range: 2.5 });
+  } else {
+    const k = Math.min(1, dt * 12), x = Math.cos(o.a) * o.r * sysR, y = Math.sin(o.a) * o.r * sysR;
+    const nx = x + (q.x - x) * k, ny = y + (q.y - y) * k;
+    o.r = THREE.MathUtils.clamp(Math.hypot(nx, ny) / sysR, orbitMin(focusS), 1); o.a = Math.atan2(ny, nx);
+    if (o.growing) o.grow = Math.min(PLANET_GROW, o.grow + dt);
+    wells.push({ x: q.x, y: q.y, z: 0, g: 3, r0: 0.5, swirl: 3, range: 1.8 });
+  }
+}
+
+// A supernova set off on top of a star or planet takes it along: a star leaves a glowing cloud behind,
+// a planet just bursts into rubble.
+function shatter(p, power) {
+  const list = level === 0 ? galaxies.filter(g => g.alive) : level === 1 && focusG ? focusG.stars : focusS ? focusS.planets : null;
+  if (!list || zoomLock) return;
+  let best = null, bd = Infinity;
+  for (const o of list) {
+    if (o.held) continue;
+    const d = Math.hypot(o.wx - p.x, o.wy - p.y);
+    // a galaxy has to be hit squarely: it may hold whole solar systems, so a near miss leaves it alone
+    if (d < (o.kind === 'galaxy' ? Math.max(1, o.radius * 0.6) : o.reach + 0.5) && d < bd) { best = o; bd = d; }
+  }
+  if (!best) return;
+  if (best.kind === 'galaxy') { ring(best.pos, 900, 7 + 4 * power, 0.4); removeBody(best); return; }
+  _w.set(best.wx, best.wy, 0);
+  ring(_w, 500, 5 + 4 * power, 0.5);
+  if (best.kind === 'star') {
+    addNebula(focusG.id, best.u, best.v, Math.random() * Math.PI, (1.6 + 2.4 * starT(best)) / galS, paletteIndex, (Math.random() * 3) | 0, Math.random() * 100);
+  } else {
+    for (let i = 0; i < 260; i++) { // rubble
+      const a = Math.random() * TAU, v = 0.5 + Math.random() * 3.5, c = 0.25 + Math.random() * 0.3;
+      spawn(best.wx, best.wy, 0, Math.cos(a) * v, Math.sin(a) * v, rnd(0.3), c, c * 0.92, c * 0.82, 0.8 + Math.random() * 1.6, 0.04 + Math.random() * 0.05);
+    }
+  }
+  removeBody(best);
+}
+
+const QUAD = new THREE.PlaneGeometry(1, 1);
+const NOISE_GLSL = /* glsl */`
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+    return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+  float fbm(vec2 p){ float v = 0.0, a = 0.5; for(int i=0;i<5;i++){ v += a*noise(p); p = p*2.03 + 17.0; a *= 0.5; } return v; }`;
+const QUAD_VERT = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+
+// a star: a hot disc (radius 0.3 of the quad) inside a flickering corona
+function makeStarMesh() {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 1 }, uDetail: { value: 0 }, uCol: { value: new THREE.Color() } },
+    vertexShader: QUAD_VERT,
+    fragmentShader: /* glsl */`
+      varying vec2 vUv; uniform float uTime, uSeed, uAlpha, uDetail; uniform vec3 uCol;
+      ${NOISE_GLSL}
+      void main(){
+        vec2 p = (vUv - 0.5) * 2.0; float r = length(p);
+        const float R = 0.3;
+        float disc = smoothstep(R, R - 0.025, r);
+        float limb = sqrt(max(0.0, 1.0 - r * r / (R * R)));
+        float gran = fbm(p * 14.0 + uSeed + vec2(uTime * 0.05, -uTime * 0.04));   // boiling surface, once we are close
+        vec3 surf = mix(uCol, vec3(1.0), 0.08 + 0.3 * limb) * (1.0 + (gran - 0.5) * 0.9 * uDetail);
+        float o = max(0.0, r - R);
+        vec2 dir = p / max(r, 1e-4);
+        float rays = 0.7 + 0.6 * fbm(dir * 2.2 + uSeed + uTime * 0.12);
+        float corona = exp(-o * 12.0) * rays * 0.4 + exp(-o * 4.5) * 0.08;
+        vec3 col = surf * disc * mix(0.7, 0.3, uDetail) + uCol * corona * (1.0 - disc);
+        col *= smoothstep(1.0, 0.6, r);
+        gl_FragColor = vec4(col * uAlpha, 1.0);
+      }`,
+    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, transparent: true,
+  });
+  const m = new THREE.Mesh(QUAD, mat);
+  m.frustumCulled = false; m.visible = false; m.renderOrder = 2.5;
+  scene.add(m);
+  return m;
+}
+
+// a planet: a sphere (radius 0.4 of the quad) lit from the direction of its sun, with optional rings
+function makePlanetMesh() {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 1 }, uGas: { value: 0 }, uCloud: { value: 0 },
+      uRing: { value: 0 }, uTilt: { value: 0 }, uLight: { value: new THREE.Vector2(1, 0) },
+      uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() }, uC: { value: new THREE.Color() } },
+    vertexShader: QUAD_VERT,
+    fragmentShader: /* glsl */`
+      varying vec2 vUv; uniform float uTime, uSeed, uAlpha, uGas, uCloud, uRing, uTilt; uniform vec2 uLight; uniform vec3 uA, uB, uC;
+      ${NOISE_GLSL}
+      void main(){
+        vec2 p = (vUv - 0.5) * 2.0; float r = length(p);
+        const float R = 0.4;
+        float disc = smoothstep(R, R - 0.02, r);
+        vec2 q = p / R; float z = sqrt(max(0.0, 1.0 - dot(q, q)));
+        vec3 L = normalize(vec3(uLight, 0.4));
+        float lit = 0.03 + 0.97 * pow(max(0.0, dot(vec3(q, z), L)), 0.85);
+        vec2 s = vec2(q.x / (0.6 + z) + uTime * 0.05, q.y) + uSeed;               // the surface, slowly turning
+        float bands = fbm(vec2(s.x * 1.2 + fbm(s * 3.0) * 0.5, q.y * 6.0 + uSeed));
+        float land = smoothstep(0.44, 0.56, fbm(s * 3.2));
+        vec3 surf = mix(uA, uB, mix(land, bands, uGas));
+        surf = mix(surf, uC, smoothstep(0.55, 0.72, fbm(s * 5.0 + 7.0)) * uCloud * (1.0 - 0.6 * uGas));
+        vec3 col = surf * lit * disc;
+        float a = disc;
+        float halo = smoothstep(R * 1.14, R, r) * (1.0 - disc);                    // a breath of atmosphere on the lit side
+        col += uC * halo * 0.22 * clamp(dot(p / max(r, 1e-4), uLight) * 0.6 + 0.5, 0.0, 1.0);
+        if (uRing > 0.0) {
+          float c = cos(uTilt), sn = sin(uTilt);
+          vec2 rq = vec2(c * p.x + sn * p.y, -sn * p.x + c * p.y);
+          float front = step(rq.y, 0.0);
+          rq.y /= 0.3;
+          float rr = length(rq) / R, outer = 1.35 + uRing * 0.95;
+          float m = smoothstep(1.22, 1.27, rr) * smoothstep(outer, outer - 0.06, rr) * (0.5 + 0.5 * sin(rr * 34.0 + uSeed));
+          float vis = m * mix(1.0 - disc, 1.0, front) * 0.75;
+          col = mix(col, mix(uB, uC, 0.5) * 0.5, vis);
+          a = max(a, vis);
+        }
+        gl_FragColor = vec4(col * uAlpha, a * uAlpha);                             // premultiplied: a planet hides what is behind it
+      }`,
+    blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+    depthWrite: false, depthTest: false, transparent: true,
+  });
+  const m = new THREE.Mesh(QUAD, mat);
+  m.frustumCulled = false; m.visible = false; m.renderOrder = 2.6;
+  scene.add(m);
+  return m;
+}
+
+const orbitGeo = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 128 }, (_, i) => new THREE.Vector3(Math.cos(i / 128 * TAU), Math.sin(i / 128 * TAU), 0)));
+function makeOrbit() {
+  const o = new THREE.LineLoop(orbitGeo, new THREE.LineBasicMaterial({ color: 0x9fc4ff, transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending, depthTest: false }));
+  o.frustumCulled = false; o.visible = false; o.renderOrder = 1.8;
+  scene.add(o);
+  return o;
+}
+
+const starPool = [], planetPool = [], orbitPool = [];
+function drawPlanet(i, x, y, r, seed, look, rings, lx, ly, alpha) {
+  const m = planetPool[i] || (planetPool[i] = makePlanetMesh()), u = m.material.uniforms;
+  m.visible = true; m.position.set(x, y, 0); m.scale.setScalar(r * 5);
+  u.uA.value.copy(look.c[0]); u.uB.value.copy(look.c[1]); u.uC.value.copy(look.c[2]);
+  u.uGas.value = look.gas; u.uCloud.value = look.cloud; u.uRing.value = rings;
+  u.uSeed.value = seed % 100; u.uTilt.value = ((seed % 7) - 3) * 0.14; u.uLight.value.set(lx, ly);
+  u.uTime.value = bodyTime; u.uAlpha.value = alpha;
+}
+
+function updateBodies(dt) {
+  let ns = 0, np = 0, no = 0;
+  if (focusG && E1 > 0.002) {
+    const k = gK / galS;
+    for (const s of focusG.stars) {
+      const focus = s === focusS && E2 > 0;
+      place(s.u, s.v, _w);
+      // the star we are diving toward swells into a sun; the others slide away and fade
+      const r = (focus ? THREE.MathUtils.lerp(starRadius(s) * k, sunRadius(s), E2) : starRadius(s) * k * zM) * (1 - 0.9 * s.swallow);
+      const a = E1 * (focus ? 1 : 1 - E2);
+      s.wx = _w.x; s.wy = _w.y; s.wr = r; s.reach = Math.max(1.4, r + 0.8);
+      if (a < 0.003) continue;
+      const m = starPool[ns] || (starPool[ns] = makeStarMesh()), u = m.material.uniforms; ns++;
+      m.visible = true; m.position.set(_w.x, _w.y, 0); m.scale.setScalar(r / 0.3 * 2);
+      starColor(starT(s), u.uCol.value);
+      u.uSeed.value = s.seed % 100; u.uTime.value = bodyTime; u.uDetail.value = focus ? E2 : 0;
+      u.uAlpha.value = a * (s.held && s.growing ? 1.15 : 1);
+    }
+  }
+  for (let i = ns; i < starPool.length; i++) starPool[i].visible = false;
+
+  const s = focusS;
+  if (s && E2 > 0.002) {
+    for (const p of s.planets) {
+      if (!p.held && p.swallow <= 0) p.a += dt * 0.11 / Math.pow(p.r, 1.5); // inner planets race, outer ones crawl
+      const R = p.r * sysR * E2, cx = Math.cos(p.a), cy = Math.sin(p.a), x = cx * R, y = cy * R, shrink = 1 - 0.9 * p.swallow;
+      const pr = planetRadius(p) * (0.4 + 0.6 * E2) * shrink;
+      p.wx = x; p.wy = y; p.reach = Math.max(1.1, pr + 0.7);
+      drawPlanet(np++, x, y, pr, p.seed, planetLook(p), p.rings, -cx, -cy, E2);
+      for (const m of p.moons) {
+        m.a += dt * 0.9 / (0.5 + m.d);
+        const md = pr * (1.7 + 3.3 * m.d) + 0.1;
+        drawPlanet(np++, x + Math.cos(m.a) * md, y + Math.sin(m.a) * md, sysR * (0.008 + (m.seed % 5) * 0.001) * shrink, m.seed, moonLook(m), 0, -cx, -cy, E2);
       }
-      col += mix(uC, vec3(1.0), 0.5) * 0.0012 / (r * r + 0.006);
-      col *= inside;
-
-      // the rim: a thin bright thread inside a wide, soft halo in the current colours
-      float flick = 0.85 + 0.3 * fbm(vec2(cos(a + uTime * 0.7), sin(a + uTime * 0.7)) * 2.0 + uTime * 0.3);
-      vec3 rimCol = mix(uA, uB, 0.5 + 0.5 * sin(a * 2.0 - uTime * 1.2));
-      float dr = r - 1.0;
-      float line = exp(-pow(dr / 0.014, 2.0)), glow = exp(-pow(dr / (dr > 0.0 ? 0.2 : 0.07), 2.0));
-      col += (rimCol * glow * 0.2 * flick + mix(rimCol, vec3(1.0), 0.3) * line * 0.38) * (1.0 + 0.9 * uPulse);
-
-      // premultiplied: the disc hides the stars behind it, everything else adds light
-      gl_FragColor = vec4(col * uOpen, inside * 0.8 * uOpen);
-    }`,
-  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
-  depthWrite: false, depthTest: false, transparent: true,
-});
-const portal = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 3.4), portalMat);
-portal.visible = false; portal.renderOrder = 1;
-scene.add(portal);
-let portalOpen = 0, portalRadius = 1, portalAge = 0, portalPulse = 0, portalWas = false;
-
-function updatePortal(dt, active, a, b) {
-  portalOpen += ((active ? 1 : 0) - portalOpen) * Math.min(1, dt * (active ? 5 : 3.5));
-  portalPulse = Math.max(0, portalPulse - dt * 1.8);
-  portal.visible = portalOpen > 0.01;
-  if (active) {
-    // sized to sit in the gap between the two palms rather than spill past them
-    const target = THREE.MathUtils.clamp(Math.hypot(a.x - b.x, a.y - b.y) / 2 - 1.0, 0.35, 4.5);
-    portalRadius += (target - portalRadius) * Math.min(1, dt * 8);
-    portal.position.lerpVectors(a, b, 0.5); portal.position.z = -0.2;
-    if (!portalWas) { portalAge = 0; portalPulse = 1; ring(portal.position, 220, 3.5, 0.2); } // it opens with a soft ripple
-    portalAge += dt;
-    // background stars get drawn onto the rim and race around it
-    wells.push({ x: portal.position.x, y: portal.position.y, z: 0, g: 3, r0: portalRadius * 1.2, swirl: 4, range: portalRadius * 2.5 + 1.5 });
-    for (let i = 0; i < 5; i++) {
-      const ang = Math.random() * TAU, c = Math.cos(ang), s = Math.sin(ang), v = 1 + Math.random() * 1.5;
-      pickColor(0.3);
-      spawn(portal.position.x + c * portalRadius, portal.position.y + s * portalRadius, 0,
-        -s * v + c * (Math.random() - 0.3) * 2, c * v + s * (Math.random() - 0.3) * 2, (Math.random() - 0.5),
-        cr, cg, cb, 0.5 + Math.random() * 0.9, 0.03 + Math.random() * 0.03);
+      const o = orbitPool[no] || (orbitPool[no] = makeOrbit()); no++;
+      o.visible = true; o.scale.setScalar(Math.max(1e-3, R)); o.material.opacity = (p.held ? 0.4 : 0.14) * E2;
     }
   }
-  portalWas = active;
-
-  // Galaxies fall in: at once if they are close, and from further and further away the longer it stays open.
-  const reach = portalRadius * 1.3 + 0.6 + portalAge * 0.55;
-  for (const g of galaxies) {
-    if (!g.alive || g.held) continue;
-    if (!active) { g.swallow = Math.max(0, g.swallow - dt * 2); continue; } // it closed in time: the galaxy recovers
-    const dx = portal.position.x - g.points.position.x, dy = portal.position.y - g.points.position.y;
-    const d = Math.hypot(dx, dy) + 1e-3;
-    if (g.swallow > 0 || d < Math.max(0.6, portalRadius * 0.7)) { // past the rim there is no way back
-      g.swallow = Math.min(1, g.swallow + dt * 1.3);
-      const k = Math.min(1, dt * 5);
-      g.points.position.x += dx * k; g.points.position.y += dy * k;
-      g.vel.multiplyScalar(Math.exp(-4 * dt));
-      if (g.swallow >= 1) { killGalaxy(g); portalPulse = 1; ring(portal.position, 300, 5, 0.3); }
-    } else if (d < reach) {
-      const acc = (3.5 + 7 * portalAge / (portalAge + 4)) * (1 - 0.6 * d / reach);
-      g.vel.x += (dx - dy * 0.3) / d * acc * dt; g.vel.y += (dy + dx * 0.3) / d * acc * dt; // spiral inward
-      g.vel.multiplyScalar(Math.exp(-1.5 * dt));
-      g.age = Math.min(g.age, GALAXY_LIFE - 4);
-    }
-  }
-
-  if (!portal.visible) return;
-  portal.scale.setScalar(portalRadius * (0.2 + 0.8 * portalOpen) * (1 + 0.04 * portalPulse));
-  const u = portalMat.uniforms;
-  u.uTime.value += dt; u.uOpen.value = portalOpen; u.uPulse.value = portalPulse;
-  u.uA.value.copy(palette[0]); u.uB.value.copy(palette[1]); u.uC.value.copy(palette[2]);
+  for (let i = np; i < planetPool.length; i++) planetPool[i].visible = false;
+  for (let i = no; i < orbitPool.length; i++) orbitPool[i].visible = false;
 }
 
-// --- nebulae: touch two pointing fingertips together, then draw them apart to stretch a cloud between them
-const NEBULA_LIFE = 60;
-function makeNebula() {
+ambient.renderOrder = 0; particles.renderOrder = 2;
+
+// --- nebulae: touch two pointing fingertips together, then draw them apart to stretch a cloud between them.
+// Each one belongs to a space: the universe (0) or the inside of one galaxy (that galaxy's id).
+const NEBULA_MAX = 4, nebulae = [], nebulaPool = [];
+function makeNebulaMesh() {
   const mat = new THREE.ShaderMaterial({
     uniforms: { uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 },
       uA: { value: new THREE.Color() }, uB: { value: new THREE.Color() }, uC: { value: new THREE.Color() } },
@@ -618,48 +920,98 @@ function makeNebula() {
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
   mesh.visible = false; mesh.renderOrder = 1.5; mesh.frustumCulled = false;
   scene.add(mesh);
-  return { mesh, mat, alive: false, held: false, age: 0, born: 0, size: 1 };
+  return mesh;
 }
-const nebulae = Array.from({ length: 4 }, makeNebula);
+// x, y and size are in the units of the nebula's own space: world units out in the universe, galaxy radii inside one
+function addNebula(space, x, y, rot, size, pal, ci, seed) {
+  const same = nebulae.filter(n => n.space === space);
+  if (same.length >= NEBULA_MAX) dropNebula(same[0]); // the oldest cloud in that space makes way
+  const mesh = nebulaPool.pop() || makeNebulaMesh(), u = mesh.material.uniforms, c = PALETTES[pal % PALETTES.length].colors;
+  u.uA.value.copy(c[ci % c.length]); u.uB.value.copy(c[(ci + 1) % c.length]); u.uC.value.copy(c[(ci + 2) % c.length]);
+  u.uSeed.value = seed;
+  const n = { mesh, space, x, y, rot, size, pal, ci, seed, held: false, born: 0 };
+  nebulae.push(n);
+  markDirty();
+  return n;
+}
+function dropNebula(n) {
+  const i = nebulae.indexOf(n);
+  if (i < 0) return;
+  nebulae.splice(i, 1); n.mesh.visible = false; nebulaPool.push(n.mesh);
+  if (nebula === n) nebula = null;
+}
 let nebula = null, nebulaLost = 0; // the one being pulled right now
+let sculpt = null;                 // ...or, inside a solar system, the planet being given rings or a moon
+
+// Inside a solar system the same gesture works on a planet: the first pull draws out rings, later ones add moons.
+function sculptPlanet(mx, my, d) {
+  if (!focusS || zoomLock) return;
+  if (!sculpt && d < T.nebulaTouch) {
+    let best = null, bd = Infinity;
+    for (const p of focusS.planets) {
+      const q = Math.hypot(p.wx - mx, p.wy - my);
+      if (q < p.reach + 0.4 && q < bd) { best = p; bd = q; }
+    }
+    if (!best) return;
+    sculpt = { p: best, moon: null };
+    if (best.rings && best.moons.length < MOON_MAX) { sculpt.moon = { d: 0, a: Math.random() * TAU, seed: newSeed() }; best.moons.push(sculpt.moon); }
+  }
+  if (sculpt) {
+    const pull = clamp01((d - 0.6) / 5);
+    if (sculpt.moon) sculpt.moon.d = pull; else sculpt.p.rings = Math.max(0.12, pull);
+  }
+}
 
 function updateNebulae(dt, L, R) {
   const both = L.active && R.active && L.gesture === 'point' && R.gesture === 'point';
+  const space = level === 0 ? 0 : level === 1 && focusG ? focusG.id : -1;
+  if (nebula && nebula.space !== space) { nebula.held = false; nebula = null; }
+  if (sculpt && level !== 2) sculpt = null;
   if (both) {
-    const a = L.tips[1], b = R.tips[1], d = Math.hypot(a.x - b.x, a.y - b.y);
-    if (!nebula && d < T.nebulaTouch) {
-      const n = nebulae.find(x => !x.alive) || nebulae.slice().sort((x, y) => y.age - x.age)[0];
-      const u = n.mat.uniforms, i = (Math.random() * palette.length) | 0;
-      u.uA.value.copy(palette[i]); u.uB.value.copy(palette[(i + 1) % palette.length]); u.uC.value.copy(palette[(i + 2) % palette.length]);
-      u.uSeed.value = Math.random() * 100;
-      n.alive = n.held = true; n.age = n.born = 0; n.size = T.nebulaMin;
-      n.mesh.visible = true; n.mesh.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, -0.5);
-      n.mesh.rotation.z = Math.atan2(b.y - a.y, b.x - a.x);
-      nebula = n;
+    const a = L.tips[1], b = R.tips[1], d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const W = space === 0 ? 1 : gK; // world units per unit of this space
+    const local = () => (space === 0 ? _w.set(mx, my, 0) : unplace(mx, my, _w));
+    if (level === 2) sculptPlanet(mx, my, d);
+    else if (!nebula && space >= 0 && d < T.nebulaTouch && !zoomLock) {
+      local();
+      nebula = addNebula(space, _w.x, _w.y, Math.atan2(b.y - a.y, b.x - a.x), T.nebulaMin / W, paletteIndex, (Math.random() * 3) | 0, Math.random() * 100);
+      nebula.held = true;
     }
     if (nebula) {
-      nebulaLost = 0;
-      const k = Math.min(1, dt * 10), m = nebula.mesh;
-      nebula.size += (THREE.MathUtils.clamp(d, T.nebulaMin, T.nebulaMax) - nebula.size) * k;
-      m.position.x += ((a.x + b.x) / 2 - m.position.x) * k; m.position.y += ((a.y + b.y) / 2 - m.position.y) * k;
+      const k = Math.min(1, dt * 10);
+      local();
+      nebula.size += (THREE.MathUtils.clamp(d, T.nebulaMin, T.nebulaMax) / W - nebula.size) * k;
+      nebula.x += (_w.x - nebula.x) * k; nebula.y += (_w.y - nebula.y) * k;
       // lies along the line between the fingertips; a half-turn either way is the same line, so take the nearer one
       let ang = Math.atan2(b.y - a.y, b.x - a.x);
-      ang += Math.PI * Math.round((m.rotation.z - ang) / Math.PI);
-      m.rotation.z += (ang - m.rotation.z) * k;
+      ang += Math.PI * Math.round((nebula.rot - ang) / Math.PI);
+      nebula.rot += (ang - nebula.rot) * k;
+    }
+    if (nebula || sculpt) {
+      nebulaLost = 0;
       for (const t of [a, b]) { // a spark at each fingertip
         pickColor(0.5);
         spawn(t.x + rnd(0.05), t.y + rnd(0.05), t.z, rnd(0.5), rnd(0.5), rnd(0.3), cr, cg, cb, 0.3 + Math.random() * 0.5, 0.04 + Math.random() * 0.04);
       }
     }
-  } else if (nebula && (nebulaLost += dt) > 0.3) { nebula.held = false; nebula = null; }
+  } else if ((nebula || sculpt) && (nebulaLost += dt) > 0.3) {
+    if (nebula) nebula.held = false;
+    nebula = null; sculpt = null; markDirty();
+  }
 
   for (const n of nebulae) {
-    if (!n.alive) continue;
     n.born += dt;
-    if (n.held) n.age = 0; else if ((n.age += dt) > NEBULA_LIFE) { n.alive = false; n.mesh.visible = false; continue; }
-    n.mesh.scale.set(n.size * 1.5 + 0.4, n.size * 1.05 + 0.4, 1);
-    n.mat.uniforms.uTime.value += dt * (n.held ? 2.5 : 1);
-    n.mat.uniforms.uAlpha.value = Math.min(1, n.born * 2.5) * Math.min(1, (NEBULA_LIFE - n.age) / 5);
+    const out = n.space === 0, seen = out ? 1 - E1 : focusG && n.space === focusG.id ? E1 * (1 - E2) : 0;
+    n.mesh.visible = seen > 0.003;
+    if (!n.mesh.visible) continue;
+    let W = 1, f = 1;
+    if (out) n.mesh.position.set(n.x, n.y, -0.5);
+    else { place(n.x, n.y, _w); n.mesh.position.set(_w.x, _w.y, -0.5); W = gK * zM; f = W / galS; }
+    const sw = n.size * W;
+    n.mesh.scale.set(sw * 1.5 + 0.4 * f, sw * 1.05 + 0.4 * f, 1);
+    n.mesh.rotation.z = n.rot;
+    n.mesh.material.uniforms.uTime.value += dt * (n.held ? 2.5 : 1);
+    n.mesh.material.uniforms.uAlpha.value = Math.min(1, n.born * 2.5) * seen;
   }
 }
 
@@ -677,7 +1029,9 @@ class Hand {
     this.pinchPt = new THREE.Vector3(); this.prevTip = new THREE.Vector3();
     this.quat = new THREE.Quaternion(); this.hasQuat = false; this.grabInv = null; this.grabQ = new THREE.Quaternion();
     this.gesture = 'none'; this.cand = 'none'; this.candN = 0; this.lastSolid = 'none';
-    this.charge = 0; this.lastBurst = -10; this.lastPeace = -10; this.galaxy = null;
+    this.charge = 0; this.lastBurst = -10; this.lastPeace = -10; this.lastOpen = -10; this.pinchAt = null;
+    this.grab = null;   // the galaxy, star or planet this hand is pinching
+    this.assist = null; // ...or one the other hand is pinching that this hand has joined in on
 
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(CONNECTIONS.length * 6), 3));
@@ -711,6 +1065,7 @@ class Hand {
     if (rawGesture === this.cand) this.candN++; else { this.cand = rawGesture; this.candN = 1; }
     this.prevGesture = this.gesture;
     if (this.candN >= (this.cand === 'fist' ? T.fistHoldFrames : T.holdFrames)) this.gesture = this.cand;
+    if (this.gesture === 'open') this.lastOpen = now;
   }
 
   drawSkeleton() {
@@ -728,16 +1083,20 @@ class Hand {
   }
 
   release() {
-    if (this.galaxy) {
-      this.galaxy.held = false; this.galaxy.growing = false; this.galaxy.holder = null;
-      // it stays where you put it unless you actually throw it
-      if (this.vel.length() > T.grabFling) this.galaxy.vel.copy(this.vel).multiplyScalar(0.25).clampLength(0, 3);
-      else this.galaxy.vel.set(0, 0, 0);
-      this.galaxy = null;
+    const o = this.grab;
+    if (o) {
+      o.held = false; o.growing = false; o.isNew = false; o.holder = null;
+      if (o.kind === 'galaxy') { // it stays where you put it unless you actually throw it
+        if (this.vel.length() > T.grabFling) o.vel.copy(this.vel).multiplyScalar(0.25).clampLength(0, 3);
+        else o.vel.set(0, 0, 0);
+      }
+      this.grab = null;
+      markDirty();
     }
+    this.assist = null;
   }
 
-  deactivate() { this.release(); this.active = false; this.gesture = 'none'; this.charge = 0; this.hasQuat = false; }
+  deactivate() { this.release(); this.pinchAt = null; this.active = false; this.gesture = 'none'; this.charge = 0; this.hasQuat = false; }
 
   // Orientation of the palm, from the knuckle line (index to pinky) and the wrist-to-middle-knuckle line.
   updateOrientation(fresh) {
@@ -753,19 +1112,19 @@ class Hand {
     this.hasQuat = true;
   }
 
-  act(now, dt, portalActive, sculpting) {
+  act(now, dt, sculpting) {
     const g = this.gesture, p = this.pos;
-    if (g !== 'pinch') this.release();
+    if (g !== 'pinch') { this.release(); this.pinchAt = null; } else if (this.pinchAt == null) this.pinchAt = now;
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
     if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
 
     if (g === 'open') {
       // An open hand on its own never explodes. The supernova only fires when a fist that has
       // actually been gathering is opened.
-      if (this.charge >= T.minCharge) { burst(p, this.charge, this.vel); this.lastBurst = now; }
+      if (this.charge >= T.minCharge) { burst(p, this.charge, this.vel); shatter(p, this.charge); this.lastBurst = now; }
       this.charge = 0;
-      if (!portalActive) wells.push({ x: p.x, y: p.y, z: p.z, g: -7 });
-      if (!portalActive) { // streamers off every fingertip
+      wells.push({ x: p.x, y: p.y, z: p.z, g: -7 });
+      { // streamers off every fingertip
         for (const t of this.tips) for (let k = 0; k < 5; k++) {
           _v.subVectors(t, p).normalize().multiplyScalar(1.5 + Math.random() * 2.5);
           pickColor(0.2);
@@ -780,20 +1139,23 @@ class Hand {
       pickColor(0.8); // hot core
       spawn(p.x + rnd(0.05), p.y + rnd(0.05), p.z, 0, 0, 0, cr * 0.4, cg * 0.4, cb * 0.4, 0.2, 0.3 + 0.6 * this.charge);
     } else if (g === 'pinch') {
-      if (!this.galaxy) {
-        this.galaxy = pinchGalaxy(this.pinchPt, this, now);
-        this.grabInv = null; // remember how the hand and the galaxy were angled when the pinch began
-        if (this.galaxy && this.hasQuat) { this.grabInv = this.quat.clone().invert(); this.grabQ.copy(this.galaxy.points.quaternion); }
-      }
-      if (this.galaxy) {
-        this.galaxy.points.position.lerp(this.pinchPt, Math.min(1, dt * (this.galaxy.growing ? 14 : 7)));
-        if (this.grabInv && this.hasQuat) { // the galaxy turns with the hand from then on
-          _q.copy(this.quat).multiply(this.grabInv).multiply(this.grabQ);
-          this.galaxy.points.quaternion.slerp(_q, Math.min(1, dt * 10));
+      if (this.assist && !this.assist.held) this.assist = null; // the other hand let go: this one takes it over
+      if (!this.grab && !this.assist && !zoomLock) {
+        const q = this.pinchPt; // what a pinch makes or picks up depends on how far in we are
+        // Picking something up is instant, but making something new waits for the pinch to be held a moment:
+        // a hand closing into a fist passes through a pinch on the way, and that must not leave a stray behind.
+        const ready = now - this.pinchAt >= T.pinchHold, make = fn => () => (ready ? fn(q) : null);
+        this.grab = level === 0 ? pinchPick(galaxies.filter(x => x.alive), q, this, now, make(acquireGalaxy))
+          : level === 1 ? pinchPick(focusG.stars, q, this, now, make(newStar))
+          : pinchPick(focusS.planets, q, this, now, make(newPlanet));
+        if (!this.grab && !this.assist && !ready) { // a glint at the fingertips while it waits
+          pickColor(0.6);
+          spawn(q.x + rnd(0.06), q.y + rnd(0.06), q.z, rnd(0.3), rnd(0.3), 0, cr, cg, cb, 0.25 + Math.random() * 0.25, 0.04);
         }
-        const q = this.pinchPt, r = this.galaxy.points.scale.x; // nearby stars fall into orbit
-        wells.push({ x: q.x, y: q.y, z: q.z, g: 6, r0: r * 0.9, swirl: 5, range: 2 + r * 1.5 });
+        this.grabInv = null; // remember how the hand and the galaxy were angled when the pinch began
+        if (this.grab?.kind === 'galaxy' && this.hasQuat) { this.grabInv = this.quat.clone().invert(); this.grabQ.copy(this.grab.quat); }
       }
+      if (this.grab) holdBody(this, this.grab, dt);
     } else if (g === 'point' && !sculpting) {
       const tip = this.tips[1], n = 14;
       for (let k = 0; k < n; k++) { // interpolate so fast strokes stay continuous
@@ -880,7 +1242,7 @@ async function startCamera() {
   camBtn.hidden = false;
   hintEl.textContent = matchMedia('(pointer: coarse)').matches
     ? 'Prop your device up and step back so the camera can see both hands · tap here to hide this guide'
-    : 'Stand back so the camera sees your hands · V camera preview · F full screen · H hides this guide';
+    : 'Stand back so the camera sees your hands · V camera preview · F full screen · U universes · H hides this guide';
 }
 
 function trackCamera(now, dt) {
@@ -929,7 +1291,178 @@ const introEl = document.getElementById('intro'), statusEl = document.getElement
 const hudEl = document.getElementById('hud'), hintEl = document.getElementById('hint'), paletteEl = document.getElementById('palette');
 const chips = Object.fromEntries([...document.querySelectorAll('.chip')].map(c => [c.dataset.g, c]));
 function setStatus(msg, err = false) { statusEl.textContent = msg; statusEl.classList.toggle('err', err); }
-function enter() { keepAwake(); legendBtn.hidden = false; setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on'); }
+const whereEl = document.getElementById('where'), noteEl = document.getElementById('note'), upBtn = document.getElementById('upBtn');
+let entered = false, noteT = 0, saveT = 0;
+function enter() {
+  if (entered) return;
+  keepAwake(); legendBtn.hidden = false; setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on');
+  loadUniverse(); entered = true; whereEl.classList.add('on'); refreshChrome();
+}
+
+// a short message in the middle of the screen: what you are growing, where you have arrived, why nothing happened
+function note(msg, secs = 3.5) {
+  if (noteEl.textContent !== msg) noteEl.textContent = msg;
+  noteEl.classList.add('on'); noteT = secs;
+}
+
+// the gesture guide and the "where am I" line change with the level
+const LEGEND = {
+  'fist open': ['<b>Fist</b>gather, then <b class="in">open</b> for a supernova; on a galaxy it destroys it',
+    '<b>Fist</b>gather, then <b class="in">open</b> on a star to blow it up',
+    '<b>Fist</b>gather, then <b class="in">open</b> on a planet to smash it'],
+  pinch: ['<b>Pinch</b>hold to grow a galaxy, twist to tilt, or grab one',
+    '<b>Pinch</b>hold to grow a star, or grab one',
+    '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit'],
+  zoom: ['<b>Both hands open</b>together over a galaxy, then sweep apart to dive in',
+    '<b>Both hands open</b>sweep apart over a star to visit, or together to leave',
+    '<b>Both hands open</b>sweep together to leave'],
+  nebula: ['<b>Two fingertips</b>touch, then pull apart for a nebula',
+    '<b>Two fingertips</b>touch, then pull apart for a dust cloud',
+    '<b>Two fingertips</b>touch on a planet, pull apart for rings, then moons'],
+};
+const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to light a star.', 'A solar system. Pinch and hold to grow a planet.'];
+function refreshChrome() {
+  for (const k in LEGEND) if (chips[k]) chips[k].innerHTML = LEGEND[k][level];
+  whereEl.textContent = level === 0 ? 'Universe' : level === 1 ? 'Universe › Galaxy' : `Universe › Galaxy › ${focusS ? starName(focusS) : 'Star'}`;
+  upBtn.hidden = !entered || level === 0;
+  savesBtn.hidden = !entered;
+}
+upBtn.addEventListener('click', e => { surface(); e.currentTarget.blur(); });
+window.addEventListener('keydown', e => { if ((e.key === 'b' || e.key === 'B' || e.key === 'Backspace') && !e.ctrlKey && !e.metaKey && !e.altKey && entered) surface(); });
+
+// Everything you make is kept in this browser, so the universe is still there next time.
+const SAVE_KEY = 'handiverse.universe.v1';
+function markDirty() { if (saveT <= 0) saveT = 1.5; }
+function snapshot() {
+  const r = x => Math.round(x * 1e4) / 1e4;
+  return { v: 1, nextId,
+    galaxies: galaxies.filter(g => g.alive).map(g => ({ id: g.id, seed: g.seed, pal: g.pal, grow: r(g.grow),
+      p: g.pos.toArray().map(r), q: g.quat.toArray().map(r),
+      stars: g.stars.map(s => ({ u: r(s.u), v: r(s.v), grow: r(s.grow), seed: s.seed,
+        planets: s.planets.map(p => ({ r: r(p.r), a: r(p.a), grow: r(p.grow), seed: p.seed, rings: r(p.rings),
+          moons: p.moons.map(m => ({ d: r(m.d), a: r(m.a), seed: m.seed })) })) })) })),
+    nebulae: nebulae.map(n => ({ space: n.space, x: r(n.x), y: r(n.y), rot: r(n.rot), size: r(n.size), pal: n.pal, ci: n.ci, seed: r(n.seed) })) };
+}
+function saveUniverse() {
+  saveT = 0;
+  if (!entered) return;
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch {}
+}
+// back to an empty universe, seen from the outside
+function clearUniverse() {
+  for (const h of [hands.Left, hands.Right]) h.release();
+  for (const g of galaxies) if (g.alive) killGalaxy(g);
+  while (nebulae.length) dropNebula(nebulae[0]);
+  nebula = null; sculpt = null; nextId = 1;
+  level = 0; depth = 0; zoomNudge = 0; zoomHeld = 0; zoomOn = false; zoomKey = null; zoomLock = false; focusG = focusS = null;
+}
+function applySnapshot(d) {
+  clearUniverse();
+  if (!d || d.v !== 1) return;
+  nextId = d.nextId || 1;
+  (d.galaxies || []).slice(0, GALAXY_MAX).forEach((s, i) => {
+    const g = galaxies[i];
+    g.id = s.id; g.seed = s.seed; g.pal = s.pal; g.grow = s.grow; g.pos.fromArray(s.p); g.quat.fromArray(s.q); g.vel.set(0, 0, 0);
+    g.stars = (s.stars || []).map(a => {
+      const st = mkStar(a.u, a.v, a.grow, a.seed);
+      st.planets = (a.planets || []).map(b => { const p = mkPlanet(b.r, b.a, b.grow, b.seed); p.rings = b.rings || 0; p.moons = (b.moons || []).map(m => ({ ...m })); return p; });
+      return st;
+    });
+    shapeGalaxy(g);
+    g.alive = true; g.held = g.growing = g.isNew = false; g.holder = null; g.swallow = 0;
+  });
+  for (const n of d.nebulae || []) addNebula(n.space, n.x, n.y, n.rot, n.size, n.pal, n.ci, n.seed).born = 1;
+}
+function loadUniverse() {
+  try { applySnapshot(JSON.parse(localStorage.getItem(SAVE_KEY) || 'null')); }
+  catch (err) { console.warn('Could not restore the saved universe:', err); }
+  saveT = 0;
+}
+window.addEventListener('pagehide', saveUniverse);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveUniverse(); });
+
+// --- named saves: any number of universes kept side by side, plus a way to start a fresh one
+const SLOTS_KEY = 'handiverse.saves.v1';
+const savesEl = document.getElementById('saves'), savesBtn = document.getElementById('savesBtn'), saveList = document.getElementById('saveList');
+const saveName = document.getElementById('saveName'), newUniBtn = document.getElementById('newUni');
+const readSlots = () => { try { const a = JSON.parse(localStorage.getItem(SLOTS_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } };
+const writeSlots = a => { try { localStorage.setItem(SLOTS_KEY, JSON.stringify(a)); return true; } catch { return false; } };
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function describe(d) {
+  const gs = d.galaxies || [], stars = gs.reduce((n, g) => n + (g.stars || []).length, 0);
+  const planets = gs.reduce((n, g) => n + (g.stars || []).reduce((m, s) => m + (s.planets || []).length, 0), 0);
+  return `${count(gs.length, 'galaxy', 'galaxies')} · ${count(stars, 'star', 'stars')} · ${count(planets, 'planet', 'planets')}`;
+}
+// a button that asks once more before doing something that cannot be undone
+function twice(btn, ask, fn) {
+  const label = btn.textContent;
+  btn.addEventListener('click', () => {
+    if (btn.classList.contains('armed')) return fn();
+    btn.classList.add('armed'); btn.textContent = ask;
+    setTimeout(() => { btn.classList.remove('armed'); btn.textContent = label; }, 2500);
+  });
+}
+function renderSaves() {
+  const slots = readSlots();
+  saveList.replaceChildren(...slots.map(s => {
+    const li = document.createElement('li'), info = document.createElement('div'), name = document.createElement('b'), sub = document.createElement('span');
+    const load = document.createElement('button'), del = document.createElement('button');
+    name.textContent = s.name;
+    sub.textContent = `${describe(s.data)} · ${new Date(s.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+    info.append(name, sub);
+    load.type = del.type = 'button'; load.textContent = 'Load'; del.textContent = 'Delete'; del.className = 'quiet';
+    twice(load, 'Replace current?', () => {
+      applySnapshot(s.data); saveUniverse(); refreshChrome(); showSaves(false); note(`Loaded ${s.name}`);
+    });
+    twice(del, 'Sure?', () => { writeSlots(readSlots().filter(x => x.id !== s.id)); renderSaves(); });
+    li.append(info, load, del);
+    return li;
+  }));
+  document.getElementById('saveEmpty').hidden = slots.length > 0;
+  saveName.placeholder = `Universe ${slots.length + 1}`;
+}
+function showSaves(on) {
+  if (!entered) return;
+  savesEl.hidden = !on; savesBtn.classList.toggle('lit', on);
+  if (on) { saveName.value = ''; renderSaves(); } else saveName.blur();
+}
+document.getElementById('saveForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const name = saveName.value.trim() || saveName.placeholder, slots = readSlots().filter(s => s.name !== name); // same name: overwrite
+  slots.unshift({ id: Date.now(), name, at: Date.now(), data: snapshot() });
+  if (writeSlots(slots)) note(`Saved ${name}`); else note('Could not save: this browser\'s storage is full or blocked.');
+  saveName.value = ''; renderSaves();
+});
+savesBtn.addEventListener('click', e => { showSaves(savesEl.hidden); e.currentTarget.blur(); });
+document.getElementById('savesClose').addEventListener('click', () => showSaves(false));
+savesEl.addEventListener('click', e => { if (e.target === savesEl) showSaves(false); });
+
+// A new universe wipes the one you are in, so it has to be held for, not just tapped: the button in the
+// panel, or the N key.
+const HOLD = 1.2;
+let holdTimer = 0;
+function newUniverse() {
+  clearUniverse(); saveUniverse(); refreshChrome(); showSaves(false); note('A new universe');
+}
+function holdStart() {
+  if (holdTimer || !entered) return;
+  newUniBtn.classList.add('holding');
+  holdTimer = setTimeout(() => { holdEnd(); newUniverse(); }, HOLD * 1000);
+}
+function holdEnd() { clearTimeout(holdTimer); holdTimer = 0; newUniBtn.classList.remove('holding'); }
+newUniBtn.addEventListener('pointerdown', holdStart);
+for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) newUniBtn.addEventListener(ev, holdEnd);
+newUniBtn.addEventListener('contextmenu', e => e.preventDefault()); // a long press on a touch screen
+// typing a name must not set off the single-key shortcuts
+window.addEventListener('keydown', e => { if (e.target instanceof HTMLInputElement) { if (e.key === 'Escape') showSaves(false); e.stopImmediatePropagation(); } }, true);
+window.addEventListener('keydown', e => {
+  if (!entered || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'u' || e.key === 'U') showSaves(savesEl.hidden);
+  else if (e.key === 'Escape') showSaves(false);
+  else if ((e.key === 'n' || e.key === 'N') && !e.repeat) { holdStart(); if (holdTimer) note('Keep holding N for a new universe…', HOLD); }
+});
+window.addEventListener('keyup', e => { if (e.key === 'n' || e.key === 'N') holdEnd(); });
+window.addEventListener('blur', holdEnd);
 
 document.getElementById('startCam').addEventListener('click', async e => {
   e.currentTarget.disabled = true;
@@ -1050,21 +1583,28 @@ function frame() {
   for (const h of [L, R]) {
     if (h.active && now - h.lastSeen > 0.35) h.deactivate();
   }
-  const novaBusy = Math.max(L.charge, R.charge) >= T.minCharge || now - Math.max(L.lastBurst, R.lastBurst) < T.portalDelay;
-  const portalActive = L.active && R.active && L.gesture === 'open' && R.gesture === 'open' && !novaBusy;
+  updateView(dt);
   updateNebulae(dt, L, R);
-  for (const h of [L, R]) { if (h.active) h.act(now, dt, portalActive, !!nebula); h.drawSkeleton(); }
+  const drawing = !!(nebula || sculpt);
+  for (const h of [L, R]) { if (h.active) h.act(now, dt, drawing); h.drawSkeleton(); }
+  updateZoom(L, R, now, dt);
 
-  updatePortal(dt, portalActive, L.pos, R.pos);
   updateGalaxies(dt);
+  updateBodies(dt);
   updateParticles(dt);
   updateAmbient(dt);
 
   for (const g in chips) {
     const names = g.split(' ');
-    chips[g].classList.toggle('active', g === 'portal' ? portalActive : g === 'nebula' ? !!nebula
-      : !portalActive && !(nebula && g === 'point') && ((L.active && names.includes(L.gesture)) || (R.active && names.includes(R.gesture))));
+    chips[g].classList.toggle('active', g === 'nebula' ? drawing : g === 'zoom' ? zoomShow
+      : !(drawing && g === 'point') && ((L.active && names.includes(L.gesture)) || (R.active && names.includes(R.gesture))));
   }
+
+  // name the star or planet being grown, as it passes from one kind to the next
+  const maker = [L, R].find(h => h.active && h.grab && h.grab.growing && h.grab.kind !== 'galaxy');
+  if (maker) note(maker.grab.kind === 'star' ? starName(maker.grab) : planetName(maker.grab), 0.5);
+  else if (noteT > 0 && (noteT -= dt) <= 0) noteEl.classList.remove('on');
+  if (saveT > 0 && (saveT -= dt) <= 0) saveUniverse();
 
   // gentle parallax toward the hands
   let tx = 0, ty = 0, n = 0;
@@ -1078,4 +1618,13 @@ function frame() {
 }
 frame();
 
-window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, get mode() { return mode; } };
+// A handle for poking at things from the console. pose() stands in for the camera: call it every frame
+// with a hand's position and gesture and the rest of the game cannot tell the difference.
+window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, enter, surface, saveUniverse,
+  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; },
+  pose(key, x, y, gesture, tipX = x, tipY = y) {
+    const h = hands[key], fresh = !h.active;
+    h.prevPos.copy(h.pos); h.pos.set(x, y, 0); h.hasJoints = false; h.pinchPt.set(x, y, 0);
+    for (const t of h.tips) t.set(tipX, tipY, 0);
+    h.setPose(performance.now() / 1000, 1 / 60, gesture, fresh);
+  } };
