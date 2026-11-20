@@ -33,6 +33,7 @@ const T = {
   nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
+  landHold: 1.0,       // two fingers rested this long on a spot of a planet take you down to stand there
   climateHold: 1.0,    // seconds a pointing finger must rest on a planet before the climate there changes
   climateStep: 1.5,    // ...and how long each climate lasts before it moves on to the next, if the finger stays
   zoomPull: 2.0,       // how far (world units) two open hands must sweep apart to dive in
@@ -525,7 +526,7 @@ function updateGalaxies(dt) {
 // is under way, so the view starts answering the hands before the dive commits.
 const C0 = new THREE.Vector3(0, 0, -1), FACE = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
 const SYSTEM_ZOOM = 5;
-let level = 0, depth = 0, E1 = 0, E2 = 0, E3 = 0, focusG = null, focusS = null, focusP = null;
+let level = 0, depth = 0, E1 = 0, E2 = 0, E3 = 0, E4 = 0, focusG = null, focusS = null, focusP = null, land = null;
 let zoomNudge = 0, zoomLock = false, zoomKey = null, zoomOn = false, zoomMin = 0, zoomMax = 0, zoomGap = 0, zoomHeld = 0, zoomShow = false, zoomWait = 0, zoomFar = 0, zoomMeet = false, zoomRested = 0;
 let galS = 9, sysR = 4.8, gK = 1, zM = 1, zPx = 0, zPy = 0, bodyTime = 0;
 const gO = new THREE.Vector3(), _w = new THREE.Vector3();
@@ -534,13 +535,13 @@ const ease = t => t * t * (3 - 2 * t), clamp01 = t => Math.min(1, Math.max(0, t)
 function updateView(dt) {
   galS = Math.max(viewW, viewH) * 0.5;  // how big a galaxy's disc is drawn once we are inside it
   sysR = Math.min(viewW, viewH) * 0.47; // the widest orbit that still fits on screen
-  if (level === 3 && !focusP) setLevel(2);
+  if (level >= 3 && !focusP) setLevel(2);
   if (level >= 2 && !focusS) setLevel(1);
   if (level >= 1 && !focusG) setLevel(0);
   const target = level + zoomNudge;
   depth += (target - depth) * Math.min(1, dt * 3);
   if (Math.abs(target - depth) < 0.0015) depth = target;
-  E1 = ease(clamp01(depth)); E2 = ease(clamp01(depth - 1)); E3 = ease(clamp01(depth - 2));
+  E1 = ease(clamp01(depth)); E2 = ease(clamp01(depth - 1)); E3 = ease(clamp01(depth - 2)); E4 = ease(clamp01(depth - 3));
   if (level < 3 && E3 === 0 && zoomKey !== focusP) focusP = null;
   if (level < 2 && E2 === 0 && zoomKey !== focusS) focusS = null;
   if (level < 1 && E1 === 0 && zoomKey !== focusG) focusG = null;
@@ -1278,16 +1279,18 @@ function planetDig(hand, now, dt) {
   touched(now);
   return true;
 }
-// Peace sign drawn across the land leaves a river behind the fingertip.
-function planetRiver(hand, now) {
-  const p = focusP, a = hand.prevTip, b = hand.tips[1];
+// Two fingers rested on the land take you down to stand there. Moving them only moves where that will be.
+function planetPeace(hand, now) {
+  const p = focusP, tip = hand.tips[1];
   if (!p || !isSolid(p)) return;
-  for (let s = 1; s <= 4; s++) {
-    if (!globePoint(a.x + (b.x - a.x) * s / 4, a.y + (b.y - a.y) * s / 4)) continue;
-    brush(at.lon, at.lat, 0.022, (k, d) => { const w = 1 - d; mapR[k] = Math.max(mapR[k], Math.min(1, w * 2.2)); mapH[k] = clampH(mapH[k] - 0.002 * w); });
-    touched(now);
-  }
-  if (globePoint(b.x, b.y)) dust(b.x, b.y, 1, 0.2, 0.45, 0.7);
+  if (hand.lastSolid !== 'peace' || !hand.rest) hand.rest = { x: tip.x, y: tip.y, t: now };
+  const r = hand.rest;
+  if (Math.hypot(tip.x - r.x, tip.y - r.y) > 0.45 || !globePoint(tip.x, tip.y)) { r.x = tip.x; r.y = tip.y; r.t = now; return; }
+  globeBusy = now;
+  const k = (now - r.t) / T.landHold;
+  pickColor(0.7);
+  for (let i = 0; i < 3; i++) { const a = Math.random() * TAU, d = 0.5 * (1 - Math.min(1, k)) + 0.08; spawn(tip.x + Math.cos(a) * d, tip.y + Math.sin(a) * d, 0, 0, 0, 0, cr, cg, cb, 0.25, 0.05); } // a ring closing in
+  if (k >= 1) { hand.rest = null; enterLand(at.lon, at.lat); }
 }
 // A pointing finger rested on one spot changes the climate around it, and goes on to the next kind for as
 // long as it stays: [name, warmer or colder, wetter or drier].
@@ -1351,6 +1354,209 @@ function updateGlobe(dt, now, px, py, radius, lx, ly) {
   u.uLight.value.set(lx * 0.75, ly * 0.75, 0.8).normalize();
   u.uSea.value = isSolid(p) ? seaOf(p) : 0; u.uTime.value = bodyTime; u.uAlpha.value = Math.min(1, E3 * 4);
   globe.visible = true; globe.position.set(px, py, 0); globe.scale.setScalar(radius * 5);
+}
+
+// ---------------------------------------------------------------- down on the surface
+// Two fingers rested on a spot of a planet take you down inside its air, to stand in that place: its heights,
+// its water, its cold and its damp are read off the planet's map there and painted as a landscape.
+const WEATHER = [['Clear skies', 0.12, 0, 0], ['Clouds', 0.62, 0, 0], ['Storm', 1, 1, 0.2], ['Mist', 0.4, 0, 1]]; // name, cloud, rain, fog
+const LAND_M = 1.25, LAND_H0 = 0.44; // the picture overfills the screen by this much; where its horizon sits
+const landMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 }, uAspect: { value: 1.7 }, uRelief: { value: 0.5 }, uWater: { value: 0 }, uCold: { value: 0 },
+    uAirT: { value: 0.5 }, uDamp: { value: 0.5 }, uPan: { value: 0 }, uCloud: { value: 0.2 }, uRain: { value: 0 }, uFog: { value: 0 }, uFlash: { value: 0 }, uBoltX: { value: 0 },
+    uRing: { value: 0 }, uMoons: { value: 0 }, uAir: { value: 1 }, uSnowing: { value: 0 }, uSun: { value: new THREE.Vector2(0.4, 0.72) },
+    uDeep: col3(0, 0, 0), uShallow: col3(0, 0, 0), uSand: col3(0, 0, 0), uLow: col3(0, 0, 0), uForest: col3(0, 0, 0), uHigh: col3(0, 0, 0), uPeak: col3(1, 1, 1), uAtm: col3(0, 0, 0) },
+  vertexShader: QUAD_VERT,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform float uTime, uSeed, uAlpha, uAspect, uRelief, uWater, uCold, uAirT, uDamp, uPan, uCloud, uRain, uFog, uFlash, uBoltX, uRing, uMoons, uAir, uSnowing;
+    uniform vec2 uSun;
+    uniform vec3 uDeep, uShallow, uSand, uLow, uForest, uHigh, uPeak, uAtm;
+    ${NOISE_GLSL}
+    const float H0 = ${LAND_H0};
+    float gDay, gDusk, gSh; vec3 gTint, gLight, gHz;
+
+    // the skyline of one range of hills: rolling where the land is gentle, sharp where it is mountainous
+    float crags(vec2 p){ float v = 0.0, a = 0.55; for (int i = 0; i < 4; i++) { float n = 1.0 - abs(2.0 * noise(p) - 1.0); v += a * n * n; p = p * 2.1 + 13.0; a *= 0.5; } return v; }
+    float ridge(float x, float i){
+      vec2 q = vec2(x, i * 17.3 + uSeed);
+      float a = fbm(q);
+      return mix(a, a * 0.3 + crags(q * 0.8 + 31.7) * 0.75, uRelief);
+    }
+    // one range, nearer as i grows: rgb and whether this pixel is inside it
+    vec4 range(vec2 p, float i){
+      float f = i / 5.0, fq = mix(2.4, 1.0, f);
+      float base = H0 - f * f * 0.34 - 0.004;
+      float amp = (uRelief * mix(0.42, 0.2, f) + 0.075 * (1.0 - smoothstep(0.85, 1.0, uWater))) * (1.0 - 0.45 * f * (1.0 - uRelief));
+      float px = p.x * fq + uPan * mix(0.15, 0.8, f) + i * 7.31;
+      float r0 = ridge(px, i), below = base + amp * r0 - p.y;
+      if (below <= 0.0) return vec4(0.0);
+      // Which flank is this? Look at the skyline a little way toward the sun: if it falls away, this side faces it.
+      float sgn = clamp((uSun.x - p.x) * 3.0, -1.0, 1.0);
+      float r1 = ridge(px + sgn * (0.03 + below * 1.3) * fq, i);
+      float side = mix(0.5, smoothstep(-0.014, 0.014, (r0 - r1) * amp), abs(sgn));
+      side = mix(side, 0.75, 0.5 * smoothstep(0.1, 0.45, gSh));    // a high sun lights both flanks
+      float alt = (clamp((p.y - base) / max(amp, 1e-3), 0.0, 1.0) - 0.35) * uRelief * 0.7;   // above or below where you stand
+      float n = fbm(vec2(px * 6.0, p.y * 30.0) + i * 3.0), n2 = fbm(vec2(px * 14.0 + below * 30.0 * sgn, below * 22.0) + i);
+      float damp = uDamp + (n - 0.5) * 0.3;
+      vec3 g = mix(uSand, uLow, smoothstep(0.28, 0.5, damp));
+      g = mix(g, uForest, smoothstep(0.6, 0.85, damp));
+      g = mix(g, uHigh, smoothstep(0.02, 0.22, alt + (n - 0.5) * 0.2));
+      g = mix(g, uPeak, smoothstep(0.02, -0.05, uAirT - alt * 0.9 + (n2 - 0.5) * 0.14));
+      g *= (0.38 + 0.8 * side) * (0.72 + 0.3 * n + 0.3 * n2);
+      float hz = clamp((1.0 - f * 1.15) * 0.6 + uFog * 0.5 * (1.0 - f * 0.4), 0.0, 0.97);
+      return vec4(mix(g * gLight, gHz, hz), 1.0);
+    }
+    // the sky and everything standing against it
+    vec3 world(vec2 p){
+      float up = clamp((p.y - H0) / (1.0 - H0), 0.0, 1.0);
+      vec3 hor = mix(uAtm, vec3(1.0), 0.45);
+      vec3 sky = mix(hor, uAtm * 0.55, pow(up, 0.55)) * (0.03 + 0.97 * gDay) + vec3(0.008, 0.012, 0.03);
+      float ds = length(p - uSun);
+      sky += vec3(1.0, 0.4, 0.12) * gDusk * exp(-up * 3.5) * (0.35 + 0.65 * exp(-abs(p.x - uSun.x) * 1.2));
+      float nightVis = 1.0 - gDay * uAir;                         // where the air is thin the stars never quite go out
+      vec2 sg = p * 90.0; float sr = hash(floor(sg) + uSeed);
+      sky += step(0.992, sr) * smoothstep(0.35, 0.0, length(fract(sg) - 0.5)) * (0.6 + 0.4 * sin(uTime * 2.0 + sr * 90.0)) * nightVis * 0.9 * (1.0 - uCloud * 0.85);
+      if (uRing > 0.0) {                                          // the planet's own rings, arching overhead
+        float c = 0.93 - 0.3 * (p.x - 0.2) * (p.x - 0.2), t = (p.y - c) / (0.02 + 0.045 * uRing);
+        sky += vec3(0.8, 0.75, 0.65) * smoothstep(1.0, 0.8, abs(t)) * (0.55 + 0.45 * sin(t * 14.0 + uSeed)) * 0.3 * (0.35 + 0.65 * nightVis);
+      }
+      for (int i = 0; i < 4; i++) {                               // and its moons
+        float fi = float(i);
+        if (fi >= uMoons) break;
+        vec2 mp = vec2(-0.6 + 0.42 * fi + 0.1 * sin(uSeed + fi * 2.0), 0.8 + 0.07 * sin(uSeed * 1.7 + fi * 4.1));
+        float mr = 0.02 + 0.014 * hash(vec2(fi, uSeed)), dm = length(p - mp);
+        float lit = clamp(0.5 + dot((p - mp) / mr, normalize(uSun - mp)) * 0.9, 0.0, 1.0);
+        sky = mix(sky, vec3(0.85, 0.84, 0.8) * (0.12 + 0.88 * lit) * (0.4 + 0.6 * nightVis) + sky * 0.6 * (1.0 - nightVis), smoothstep(mr, mr - 0.004, dm));
+      }
+      sky += gTint * (smoothstep(0.034, 0.028, ds) * 3.0 + exp(-ds * 9.0) * 0.45 + exp(-ds * 40.0) * 0.8);
+      float t = 1.0 / (up * 1.6 + 0.12);                          // clouds: a flat ceiling running away to the horizon
+      vec2 cuv = vec2(p.x * t * 0.9 + uPan * 0.6 + uTime * 0.02, t * 1.3) + uSeed;
+      float cl = smoothstep(0.72 - uCloud * 0.4, 0.85 - uCloud * 0.4, fbm(cuv)) * smoothstep(0.0, 0.06, up);
+      vec3 cc = vec3(0.9, 0.92, 0.96) * (0.06 + 0.94 * gDay);
+      cc = mix(cc, gTint * (0.15 + 0.9 * gDay) + vec3(1.0, 0.45, 0.2) * gDusk * 0.8, 0.4 + 0.4 * exp(-ds * 2.5));
+      cc *= 1.0 - 0.6 * uRain - 0.25 * fbm(cuv * 2.3);
+      cc += uFlash * vec3(0.8, 0.85, 1.0) * (0.3 + 0.7 * fbm(cuv * 2.0));
+      vec3 col = mix(sky, cc, cl * 0.92);
+      for (int i = 0; i < 5; i++) { vec4 r = range(p, float(i)); col = mix(col, r.rgb, r.a); }
+      return col;
+    }
+    void main(){
+      vec2 p = vec2((vUv.x - 0.5) * uAspect, vUv.y);
+      gSh = uSun.y - H0;
+      gDay = smoothstep(-0.14, 0.08, gSh);
+      gDusk = smoothstep(0.3, 0.0, gSh) * smoothstep(-0.22, -0.02, gSh);
+      gTint = mix(vec3(1.0, 0.42, 0.16), vec3(1.0, 0.95, 0.86), smoothstep(-0.02, 0.3, gSh));
+      gLight = gTint * (0.05 + 0.95 * gDay) * (1.0 - 0.45 * uRain) + vec3(0.02, 0.03, 0.07);
+      gHz = mix(uAtm, vec3(1.0), 0.45) * (0.03 + 0.97 * gDay) + vec3(1.0, 0.4, 0.12) * gDusk * 0.45 + vec3(0.008, 0.012, 0.03);
+      gHz = mix(gHz, vec3(0.6, 0.63, 0.68) * (0.06 + 0.94 * gDay), max(uFog, uRain * 0.5));
+      vec3 col = world(p);
+      float yW = uWater > 0.0 ? H0 - 0.012 - (1.0 - smoothstep(0.3, 1.0, uWater)) * 0.2 : -1.0;
+      if (p.y < yW) {                                             // water: it mirrors the world above, broken by ripples
+        float d = yW - p.y, pers = min(40.0, 1.0 / (d + 0.015));
+        float w = noise(vec2(p.x * pers * 1.5 + uPan * 3.0, pers * 2.0 + uTime * 0.6)) - 0.5;
+        vec3 refl = world(vec2(p.x + w * 0.02 * (0.3 + d * 4.0), 2.0 * yW - p.y + w * 0.012));
+        vec3 body = mix(uShallow, uDeep, smoothstep(0.0, 0.25, d)) * (0.06 + 0.94 * gDay);
+        vec3 wc = mix(body, refl, 0.35 + 0.5 * exp(-d * 6.0));
+        float gl = pow(max(0.0, 1.0 - abs(p.x - uSun.x) / (0.05 + d * 0.5)), 2.0) * step(0.55, noise(vec2(p.x * pers * 6.0, pers * 8.0 + uTime * 2.0)));
+        wc += gTint * gl * 0.7 * gDay * smoothstep(-0.02, 0.05, gSh) * (1.0 - uCloud * 0.7);
+        if (uCold > 0.0) {                                        // drifting ice, thickening to a solid pack
+          vec2 iuv = vec2(p.x * pers * 0.5 + uSeed + uPan, pers * 0.9);
+          float ic = noise(iuv) * 0.6 + noise(iuv * 3.1) * 0.4;
+          wc = mix(wc, uPeak * gLight * (0.8 + 0.2 * noise(iuv * 9.0)), smoothstep(0.72 - uCold * 0.7, 0.76 - uCold * 0.7, ic));
+        }
+        col = mix(wc, gHz, exp(-d * 25.0) * 0.6);
+      }
+      if (uWater < 0.9) { vec4 r = range(p, 5.0); col = mix(col, r.rgb, r.a); }   // the ground you stand on
+      // weather falling through the picture
+      float rr = noise(vec2((p.x + p.y * 0.18) * 300.0, p.y * 3.5 + uTime * 12.0));
+      col = mix(col, vec3(0.7, 0.75, 0.8) * (0.1 + 0.9 * gDay), smoothstep(0.74, 0.95, rr) * uRain * 0.28 * (1.0 - uSnowing));
+      for (int k = 0; k < 3; k++) {
+        float fk = float(k), s = 14.0 + fk * 9.0;
+        vec2 g = vec2(p.x * s + sin(uTime * 0.5 + fk * 2.0 + p.y * 3.0) * 0.4, p.y * s + uTime * (1.2 + fk * 0.6));
+        vec2 id = floor(g);
+        vec2 o = vec2(hash(id + fk), hash(id + 7.0 + fk)) * 0.6 + 0.2;
+        col += smoothstep(0.1, 0.03, length(fract(g) - o)) * step(0.45, hash(id + 3.0)) * uRain * uSnowing * (0.25 + 0.75 * gDay) * 0.8;
+      }
+      float bx = uBoltX + (noise(vec2(p.y * 14.0, uSeed + uBoltX * 9.0)) - 0.5) * 0.14;
+      col += vec3(0.8, 0.85, 1.0) * (smoothstep(0.007, 0.0, abs(p.x - bx)) * step(H0 - 0.08, p.y) * step(p.y, 0.86) * 2.5 + 0.12) * uFlash;
+      col = mix(col, gHz, uFog * 0.35);
+      col *= 0.72;                                                // leave the bloom something to do, not everything
+      gl_FragColor = vec4(col * uAlpha, uAlpha);
+    }`,
+  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+  depthWrite: false, depthTest: false, transparent: true,
+});
+const landMesh = new THREE.Mesh(QUAD, landMat);
+landMesh.frustumCulled = false; landMesh.visible = false; landMesh.renderOrder = 2.8;
+scene.add(landMesh);
+
+function enterLand(lon, lat) {
+  const p = focusP;
+  if (!p || !isSolid(p) || level !== 3) return;
+  const g = globeMat.uniforms, u = landMat.uniforms, sea = seaOf(p), ground = Math.max(sea, g.uBase.value);
+  const idx = (lo, la) => (Math.max(0, Math.min(MAP_H - 1, Math.floor((la / Math.PI + 0.5) * MAP_H))) * MAP_W) + (((Math.floor((lo / TAU + 0.5) * MAP_W) % MAP_W) + MAP_W) % MAP_W);
+  const k = idx(lon, lat), h = mapH[k], under = h < sea;
+  let hi = h, lo = h, wetN = 0, n = 0; // what stands around this place: how high it climbs, how much of it is water
+  for (const rad of [0.05, 0.11, 0.18]) for (let a = 0; a < 8; a++) {
+    const q = idx(lon + Math.cos(a * TAU / 8) * rad / Math.max(0.2, Math.cos(lat)), lat + Math.sin(a * TAU / 8) * rad);
+    hi = Math.max(hi, mapH[q]); lo = Math.min(lo, mapH[q]); if (mapH[q] < sea || mapR[q] > 0.5) wetN++; n++;
+  }
+  const relief = clamp01((hi - Math.max(lo, ground)) / 0.4), wetFrac = wetN / n;
+  const warm = 1 - Math.abs(lat) / 1.35 + g.uTemp.value + mapT[k], air = warm - Math.max(0, h - ground) * 0.9;
+  dirOf(lon, lat, _gc);
+  const damp = clamp01(noise3(_gc.x * 2.6, _gc.y * 2.6, _gc.z * 2.6, p.seed | 0) * 1.3 - 0.15 + mapM[k] * 0.7);
+  const water = under ? 1 : mapR[k] > 0.5 ? 0.55 : wetFrac > 0.12 ? Math.min(0.8, 0.3 + 0.5 * wetFrac) : 0;
+  const cold = clamp01((0.22 - warm) / 0.28);
+  const name = under ? (cold > 0.6 ? 'Pack ice' : cold > 0 ? 'Icy sea' : 'Open sea') : air < 0.02 ? (relief > 0.5 ? 'Snowy peaks' : 'Snowfield')
+    : relief > 0.5 ? 'Mountains' : water > 0 ? (mapR[k] > 0.5 ? 'Riverbank' : 'Shore') : damp < 0.3 ? 'Desert' : relief > 0.2 ? 'Hills' : 'Plains';
+  for (const c of ['uDeep', 'uShallow', 'uSand', 'uLow', 'uForest', 'uHigh', 'uPeak', 'uAtm']) u[c].value.copy(g[c].value);
+  u.uSeed.value = ((p.seed % 100) + lon * 3.1 + lat * 7.7 + 50) % 100; u.uRelief.value = relief; u.uWater.value = water; u.uCold.value = water ? cold : 0;
+  u.uAirT.value = air; u.uDamp.value = damp; u.uRing.value = p.rings; u.uMoons.value = p.moons.length; u.uAir.value = planetKind(p) === 'ocean' ? 1 : 0.8;
+  land = { name, air, weather: damp > 0.6 ? 1 : 0, sunX: 0.42, sunY: 0.74, pan: 0, panV: 0, panAt: -10, flash: 0 };
+  u.uSun.value.set(land.sunX, land.sunY); u.uCloud.value = WEATHER[land.weather][1]; u.uRain.value = u.uFog.value = u.uFlash.value = 0; u.uPan.value = 0;
+  for (const hd of [hands.Left, hands.Right]) { hd.release(); hd.dwell = null; hd.rest = null; hd.charge = 0; }
+  setLevel(4); warp(1);
+  note(`${name}. Pinch to move the sun; point and hold to change the weather.`, 7);
+}
+
+// what each gesture does once you are standing there
+function landAct(hand, now, dt) {
+  const g = hand.gesture;
+  if (!land || zoomLock) return;
+  if (g === 'open') {
+    if (hand.charge >= T.minCharge) { land.flash = 1; landMat.uniforms.uBoltX.value = hand.pos.x / (viewH * LAND_M); hand.lastBurst = now; } // a gathered fist let go: lightning
+    hand.charge = 0;
+    const sp = Math.abs(hand.vel.x);
+    if (sp > 0.6) { land.panV += (-hand.vel.x * (sp - 0.6) / sp / (viewH * LAND_M) / 0.8 - land.panV) * 0.3; land.panAt = now; } // a sweep of the hand walks you along
+  } else if (g === 'fist') {
+    hand.charge = Math.min(1, hand.charge + dt / 2.2); hand.fistAt = now;
+  } else if (g === 'pinch') { // take hold of the sun: day, dusk and night are wherever you put it
+    const q = hand.pinchPt, k = Math.min(1, dt * 6);
+    land.sunX += (q.x / (viewH * LAND_M) - land.sunX) * k;
+    land.sunY += (THREE.MathUtils.clamp(0.5 + q.y / (viewH * LAND_M), 0.12, 0.95) - land.sunY) * k;
+  } else if (g === 'point') { // a finger held up changes the weather, and goes on to the next kind while it stays
+    const d = hand.dwell || (hand.dwell = { t: now, step: -1 });
+    const n = Math.floor((now - d.t - T.climateHold) / T.climateStep);
+    if (n >= 0 && n > d.step) {
+      d.step = n; land.weather = (land.weather + 1) % WEATHER.length;
+      note(land.weather === 2 && land.air < 0.08 ? 'Snowstorm' : WEATHER[land.weather][0], 2);
+    }
+  }
+}
+
+function updateLand(dt, now) {
+  if (E4 <= 0 || !land) { landMesh.visible = false; if (level < 4 && E4 <= 0) land = null; return; }
+  const u = landMat.uniforms, w = WEATHER[land.weather], k = Math.min(1, dt * 1.2);
+  if (now - land.panAt > 0.1) land.panV *= Math.exp(-2.5 * dt);
+  land.pan += land.panV * dt;
+  land.flash *= Math.exp(-5 * dt);
+  u.uCloud.value += (w[1] - u.uCloud.value) * k; u.uRain.value += (w[2] - u.uRain.value) * k; u.uFog.value += (w[3] - u.uFog.value) * k;
+  u.uSnowing.value = land.air < 0.08 ? 1 : 0;
+  u.uSun.value.set(land.sunX, land.sunY); u.uPan.value = land.pan; u.uFlash.value = land.flash < 0.01 ? 0 : land.flash * (0.6 + 0.4 * Math.sin(now * 70));
+  u.uTime.value = bodyTime; u.uAlpha.value = E4; u.uAspect.value = viewW / viewH;
+  landMesh.visible = true; landMesh.scale.set(viewW * LAND_M, viewH * LAND_M, 1);
+  if (E4 >= 0.999) globe.visible = false; // nothing of the globe shows through any more
 }
 
 ambient.renderOrder = 0; particles.renderOrder = 2;
@@ -1594,6 +1800,12 @@ class Hand {
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
     if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
 
+    if (level === 4) { // standing on the ground, every gesture means something else
+      landAct(this, now, dt);
+      if (g !== 'none') this.lastSolid = g;
+      this.prevTip.copy(this.tips[1]);
+      return;
+    }
     if (g === 'open') {
       // An open hand on its own never explodes. The supernova only fires when a fist that has
       // actually been gathering is opened.
@@ -1647,7 +1859,7 @@ class Hand {
           1.6 + Math.random() * 1.6, 0.05 + Math.random() * 0.05);
       }
     } else if (g === 'peace' && level === 3) {
-      planetRiver(this, now);
+      planetPeace(this, now);
     } else if (g === 'peace') {
       if (this.lastSolid !== 'peace' && now - this.lastPeace > 1) {
         this.lastPeace = now;
@@ -1790,38 +2002,42 @@ function note(msg, secs = 3.5) {
 }
 
 // the gesture guide and the "where am I" line change with the level
-const LEGEND = { // one line per level: universe, galaxy, solar system, a world with ground, a giant
+const LEGEND = { // one line per level: universe, galaxy, solar system, a world with ground, a giant, standing on the ground
   'fist open': ['<b>Fist</b>gather, then <b class="in">open</b> for a supernova; on a galaxy it destroys it',
     '<b>Fist</b>gather, then <b class="in">open</b> on a star to blow it up',
     '<b>Fist</b>gather, then <b class="in">open</b> on a planet to smash it',
     '<b>Fist</b>on the land sinks it; gathered out in space, then <b class="in">opened</b> over it, a meteor',
-    '<b>Fist</b>gather, then <b class="in">open</b> on the planet to scar its clouds'],
+    '<b>Fist</b>gather, then <b class="in">open</b> on the planet to scar its clouds',
+    '<b>Fist</b>gather, then <b class="in">open</b> for lightning'],
   pinch: ['<b>Pinch</b>hold to grow a galaxy, twist to tilt, or grab one',
     '<b>Pinch</b>hold to grow a star, or grab one',
     '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit',
     '<b>Pinch</b>hold to swell the land, drag to draw a mountain range',
-    '<b>Pinch</b>hold on the planet to brew a storm'],
+    '<b>Pinch</b>hold on the planet to brew a storm',
+    '<b>Pinch</b>take hold of the sun and move it: day, dusk, night'],
   zoom: ['<b>Both hands open</b>sweep apart over a galaxy to dive in',
     '<b>Both hands open</b>sweep apart over a star to visit; touch and rest them together to leave',
     '<b>Both hands open</b>sweep apart over a planet to land; touch and rest them together to leave',
     '<b>Open hand</b>holds or turns the planet for the other hand; touch and rest both together to leave',
-    '<b>Open hand</b>holds or turns the planet; touch and rest both together to leave'],
+    '<b>Open hand</b>holds or turns the planet; touch and rest both together to leave',
+    '<b>Open hand</b>sweep sideways to walk along; touch and rest both together to leave'],
   point: ['<b>Point</b>draw with light', '<b>Point</b>draw with light', '<b>Point</b>draw with light',
-    '<b>Point</b>rest on a spot to change its climate', '<b>Point</b>draw with light'],
+    '<b>Point</b>rest on a spot to change its climate', '<b>Point</b>draw with light', '<b>Point</b>hold to change the weather'],
   peace: ['<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors',
-    '<b>Peace sign</b>drag across the land to draw a river', '<b>Peace sign</b>change colors'],
+    '<b>Two fingers</b>rest on a spot for a second to go down and stand there', '<b>Peace sign</b>change colors', '<b>Two fingers</b>nothing down here yet'],
   nebula: ['<b>Two fingertips</b>touch, then pull apart for a nebula',
     '<b>Two fingertips</b>touch, then pull apart for a dust cloud',
     '<b>Two fingertips</b>touch on a planet, pull apart for rings, then moons',
     '<b>Two fingertips</b>spread to raise the sea, close to drain it',
-    '<b>Two fingertips</b>spread for faster winds, close to calm them'],
+    '<b>Two fingertips</b>spread for faster winds, close to calm them',
+    '<b>Two fingertips</b>nothing down here yet'],
 };
 const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to light a star.', 'A solar system. Pinch and hold to grow a planet.',
-  'One open hand holds the planet, the other shapes it'];
+  'One open hand holds the planet, the other shapes it', 'On the surface'];
 function refreshChrome() {
-  const row = level < 3 ? level : focusP && !isSolid(focusP) ? 4 : 3;
+  const row = level < 3 ? level : level === 4 ? 5 : focusP && !isSolid(focusP) ? 4 : 3;
   for (const k in LEGEND) if (chips[k]) chips[k].innerHTML = LEGEND[k][row];
-  whereEl.textContent = level === 0 ? 'Universe' : level === 1 ? 'Universe › Galaxy' : `Universe › Galaxy › ${focusS ? starName(focusS) : 'Star'}${level === 3 && focusP ? ' › ' + planetName(focusP) : ''}`;
+  whereEl.textContent = level === 0 ? 'Universe' : level === 1 ? 'Universe › Galaxy' : `Universe › Galaxy › ${focusS ? starName(focusS) : 'Star'}${level >= 3 && focusP ? ' › ' + planetName(focusP) : ''}${level === 4 && land ? ' › ' + land.name : ''}`;
   upBtn.hidden = !entered || level === 0;
   savesBtn.hidden = !entered;
 }
@@ -1854,7 +2070,7 @@ function clearUniverse() {
   for (const g of galaxies) if (g.alive) killGalaxy(g);
   while (nebulae.length) dropNebula(nebulae[0]);
   nebula = null; sculpt = null; nextId = 1;
-  level = 0; depth = 0; zoomNudge = 0; zoomHeld = 0; zoomOn = false; zoomKey = null; zoomLock = false; focusG = focusS = focusP = null; terrainOf = null; terrainDirty = false;
+  level = 0; depth = 0; zoomNudge = 0; zoomHeld = 0; zoomOn = false; zoomKey = null; zoomLock = false; focusG = focusS = focusP = null; land = null; terrainOf = null; terrainDirty = false;
 }
 function applySnapshot(d) {
   clearUniverse();
@@ -2001,6 +2217,7 @@ function toggleCam() {
   camBtn.title = on ? 'Hide camera preview (V)' : 'Show camera preview (V)';
 }
 camBtn.addEventListener('click', e => { toggleCam(); e.currentTarget.blur(); });
+video.addEventListener('click', () => { if (video.classList.contains('on')) { toggleCam(); note('Camera view hidden. The camera button brings it back.', 3); } }); // tap the preview itself to put it away
 window.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') toggleCam(); });
 
 // full screen: button in the corner, or the F key (older iPads only have the webkit-prefixed API; iPhones have none)
@@ -2042,6 +2259,8 @@ setPalette(0);
 
 // ---------------------------------------------------------------- main loop
 let last = performance.now() / 1000, idleT = 0, nextMeteor = 4, meteor = null, perfT = 0, perfN = 0;
+let onLand = false, landCost = 0;
+function setRatio(r) { pixelRatio = r; renderer.setPixelRatio(r); composer.setPixelRatio(r); resize(); perfT = perfN = 0; }
 function frame() {
   requestAnimationFrame(frame);
   const now = performance.now() / 1000, rawDt = now - last, dt = Math.min(0.05, rawDt);
@@ -2051,8 +2270,9 @@ function frame() {
     perfT += rawDt; perfN++;
     if (perfT >= 2) {
       if (perfN / perfT < 38 && pixelRatio > 0.75) {
-        pixelRatio = Math.max(0.75, pixelRatio - 0.25);
-        renderer.setPixelRatio(pixelRatio); composer.setPixelRatio(pixelRatio); resize();
+        const to = Math.max(0.75, pixelRatio - 0.25);
+        if (onLand) landCost += pixelRatio - to; // the landscape is far heavier to draw than space: what it costs is given back on leaving
+        setRatio(to);
       }
       perfT = perfN = 0;
     }
@@ -2092,7 +2312,9 @@ function frame() {
 
   updateGalaxies(dt);
   updateBodies(dt, now);
-  bloom.strength = 0.85 - 0.6 * E3; // close to a planet the glow would wash its surface out
+  updateLand(dt, now);
+  if (onLand !== (E4 > 0.5)) { onLand = !onLand; if (landCost) setRatio(onLand ? Math.max(0.75, pixelRatio - landCost) : pixelRatio + landCost); }
+  bloom.strength = 0.85 - 0.6 * E3 - 0.07 * E4; // close to a planet the glow would wash its surface out
   updateParticles(dt);
   updateAmbient(dt);
 
@@ -2123,7 +2345,7 @@ frame();
 // A handle for poking at things from the console. pose() stands in for the camera: call it every frame
 // with a hand's position and gesture and the rest of the game cannot tell the difference.
 window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, enter, surface, saveUniverse,
-  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, get globeR() { return globeR; }, globePoint, mapH,
+  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, get globeR() { return globeR; }, globePoint, mapH,
   get at() { return at; },
   pose(key, x, y, gesture, tipX = x, tipY = y) {
     const h = hands[key], fresh = !h.active;

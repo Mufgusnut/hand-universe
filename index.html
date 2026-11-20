@@ -86,7 +86,7 @@
   #cam { position: fixed; right: calc(18px + env(safe-area-inset-right)); top: calc(18px + env(safe-area-inset-top)); width: 200px;
     max-height: 32vh; object-fit: cover; border-radius: 12px; transform: scaleX(-1);
     opacity: 0; border: 1px solid rgba(255,255,255,.15); transition: opacity .6s; z-index: 2; pointer-events: none; }
-  #cam.on { opacity: .55; }
+  #cam.on { opacity: .55; pointer-events: auto; cursor: pointer; }
   #palette { position: fixed; left: calc(24px + env(safe-area-inset-left)); top: calc(78px + env(safe-area-inset-top)); font-size: 11px; letter-spacing: .3em; text-transform: uppercase;
     color: var(--dim); z-index: 3; opacity: 0; transition: opacity 1s; }
   #palette.on { opacity: 1; }
@@ -243,6 +243,6 @@
   <div id="hint"></div>
 </div>
 
-<script type="module" src="./main.js?v=34"></script>
+<script type="module" src="./main.js?v=38"></script>
 </body>
 </html>
