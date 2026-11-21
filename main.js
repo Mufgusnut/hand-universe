@@ -33,6 +33,7 @@ const T = {
   nebulaTouch: 1.3,    // how close (world units) two pointing fingertips must come to spark a nebula
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
+  lifeSpeed: 1,        // how fast life and its troubles move along (1 = as designed)
   landHold: 1.0,       // two fingers rested this long on a spot of a planet take you down to stand there
   climateHold: 1.0,    // seconds a pointing finger must rest on a planet before the climate there changes
   climateStep: 1.5,    // ...and how long each climate lasts before it moves on to the next, if the finger stays
@@ -57,7 +58,12 @@ let palette = PALETTES[0].colors;
 // ---------------------------------------------------------------- scene
 const canvas = document.getElementById('stage');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-let pixelRatio = Math.min(window.devicePixelRatio, 1.5);
+// What the player has chosen in the settings window, remembered in this browser.
+const SET_KEY = 'handiverse.settings', SET_DEFAULT = { res: '2', glow: 1, pace: 1, disasters: true, sound: false, volume: 0.6, hum: true, chimes: true };
+const settings = { ...SET_DEFAULT };
+try { const saved = JSON.parse(localStorage.getItem(SET_KEY) || '{}'); for (const k in SET_DEFAULT) if (typeof saved[k] === typeof SET_DEFAULT[k]) settings[k] = saved[k]; } catch {}
+const autoRatio = () => Math.min(window.devicePixelRatio, 1.5);
+let pixelRatio = settings.res === 'auto' ? autoRatio() : Math.min(2, +settings.res || 1);
 renderer.setPixelRatio(pixelRatio);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 const scene = new THREE.Scene();
@@ -564,7 +570,7 @@ function unplace(x, y, out) {
 
 function setLevel(n) {
   level = n; zoomLock = true; zoomKey = null; zoomOn = false; zoomHeld = 0; refreshChrome();
-  note(n === 3 && focusP && !isSolid(focusP) ? 'Pinch the clouds to brew a storm' : ARRIVE[n], 6);
+  note(n === 3 && focusP && !isSolid(focusP) ? 'Pinch the clouds to brew a storm' : n === 3 && focusP && focusP.life && focusP.life.s === 4 ? `A civilization lives on ${properName(focusP.seed)}. ${mood(focusP.life.f)}.` : ARRIVE[n], 6);
 }
 
 function diveInto(o) {
@@ -660,9 +666,21 @@ function updateZoom(L, R, now, dt) {
 // ---------------------------------------------------------------- stars and planets
 const STAR_MAX = 16, STAR_GROW = 6, PLANET_MAX = 8, PLANET_GROW = 6, MOON_MAX = 4;
 const newSeed = () => (Math.random() * 1e9) | 0;
+// Everything you make gets a name of its own, read off its seed, so it is the same name every time you come back.
+const NAME_START = ['Va', 'Ke', 'Ti', 'Or', 'Sa', 'Lu', 'Mi', 'Za', 'El', 'Ny', 'Tha', 'Bra', 'Cor', 'Ae', 'Is', 'Dro', 'Fen', 'Ha', 'Jo', 'Qui', 'Ru', 'Sy', 'Ul', 'Xan', 'Ye', 'An', 'Bel', 'Cy', 'Del', 'Eri', 'Ga', 'Ili', 'Ka', 'Lo', 'Mor', 'No', 'Os', 'Pha', 'Rho', 'Tal'];
+const NAME_MID = ['la', 'ri', 'no', 'the', 'ma', 'lo', 'ra', 'si', 'ne', 'du', 'vi', 'ka', 'me', 'to', 'li', 'sha'];
+const NAME_END = ['ra', 'nis', 'ron', 'ria', 'th', 'ne', 'lix', 'mus', 'dor', 'ssa', 'von', 'ris', 'tea', 'on', 'ara', 'ium', 'eth', 'ys', 'una', 'ix', 'os', 'ane', 'ille', 'or'];
+function properName(seed) {
+  let x = (seed ^ 0x9e3779b9) >>> 0;
+  const next = n => { x = Math.imul(x ^ (x >>> 15), 0x2c1b3c6d) >>> 0; x = Math.imul(x ^ (x >>> 12), 0x297a2d39) >>> 0; x = (x ^ (x >>> 15)) >>> 0; return x % n; };
+  return NAME_START[next(NAME_START.length)] + (next(3) === 0 ? NAME_MID[next(NAME_MID.length)] : '') + NAME_END[next(NAME_END.length)];
+}
+// "Velora galaxy", "Kessa yellow star", "Tirune ocean world"
+const titleOf = o => properName(o.seed) + ' ' + (o.kind === 'galaxy' ? 'galaxy' : (o.kind === 'star' ? starName(o) : planetName(o)).toLowerCase());
 const mkStar = (u, v, grow, seed) => ({ kind: 'star', u, v, grow, seed, planets: [],
   held: false, growing: false, isNew: false, holder: null, swallow: 0, wx: 0, wy: 0, wr: 0.1, reach: 1.4 });
 const mkPlanet = (r, a, grow, seed) => ({ kind: 'planet', r, a, grow, seed, rings: 0, moons: [],
+  life: null, scars: [], // what lives there and how it feels about you; craters from meteors that fell while you were away
   map: null, sea: null, spots: [], wind: 1, // the surface: hand-made changes to the terrain, sea level, a giant's storms and winds
   held: false, growing: false, isNew: false, holder: null, swallow: 0, wx: 0, wy: 0, reach: 1.1 });
 
@@ -680,6 +698,11 @@ function starColor(t, out) {
 const planetT = p => Math.min(1, p.grow / PLANET_GROW);
 const planetRadius = p => sysR * (0.016 + 0.068 * Math.pow(planetT(p), 1.2));
 const planetName = p => { const t = planetT(p); return t < 0.3 ? 'Rocky world' : t < 0.55 ? 'Ocean world' : t < 0.78 ? 'Ice giant' : 'Gas giant'; };
+// A world's climate starts with where it sits: close in to its star it bakes, far out it freezes, and a hotter
+// star pushes the mild orbits further out. Then its seas: the more open water, the more rain falls on the land.
+const orbitHeat = p => { const st = p.sun || focusS; if (!st) return 0; const lo = orbitMin(st), x = clamp01((p.r - lo) / (1 - lo)); return (0.45 - x) * (x < 0.45 ? 2.6 : 1.6) + (starT(st) - 0.5) * 0.5; };
+const baseTemp = p => (planetT(p) < 0.3 ? -0.1 : 0.05) + orbitHeat(p);
+const seaWet = w => (w == null ? 0 : THREE.MathUtils.clamp((w - 0.5) * 1.2, -0.6, 0.4)); // from the share of the world under water
 const hexes = rows => rows.map(r => r.map(c => new THREE.Color(c)));
 const ROCKS = hexes([['#5c5148', '#8a7a6a', '#b9b0a5'], ['#6b3a26', '#a85a36', '#d9a27a'], ['#4a4a52', '#77777f', '#b5b5c0'], ['#3d3326', '#7d6a45', '#c9b47f']]);
 const WORLDS = hexes([['#12408f', '#8a6a48', '#ffffff'], ['#0f4f8a', '#b89a5a', '#f2f6ff'], ['#1a5a6a', '#7d6f5a', '#ffffff'], ['#1b3a9a', '#9a5f3c', '#eef4ff']]); // sea, bare land, cloud: nothing grows yet
@@ -705,7 +728,7 @@ function newPlanet(p) {
   if (focusS.planets.length >= PLANET_MAX) { note('This star has all the planets it can hold. A supernova will smash one.'); return null; }
   const o = mkPlanet(THREE.MathUtils.clamp(d / sysR, orbitMin(focusS), 1), Math.atan2(p.y, p.x), 0, newSeed());
   o.held = o.growing = o.isNew = true; o.wx = p.x; o.wy = p.y;
-  focusS.planets.push(o);
+  o.sun = focusS; focusS.planets.push(o);
   return o;
 }
 function removeBody(o) {
@@ -760,6 +783,8 @@ function shatter(p, power) {
     if (d < (o.kind === 'galaxy' ? Math.max(1, o.radius * 0.6) : o.reach + 0.5) && d < bd) { best = o; bd = d; }
   }
   if (!best) return;
+  const lost = (best.kind === 'galaxy' ? best.stars.flatMap(st => st.planets) : best.kind === 'star' ? best.planets : [best]).filter(q => q.life && q.life.s === 4).length;
+  note(`${titleOf(best)} destroyed${lost ? best.kind === 'planet' ? ', and its civilization with it' : lost > 1 ? `, and ${lost} civilizations with it` : ', and a civilization with it' : ''}`, 6);
   if (best.kind === 'galaxy') { ring(best.pos, 900, 7 + 4 * power, 0.4); removeBody(best); return; }
   _w.set(best.wx, best.wy, 0);
   ring(_w, 500, 5 + 4 * power, 0.5);
@@ -1066,13 +1091,14 @@ function storeTerrain() {
   const t = pack(CW * CH, i => sbyte(mapT[q(i)], 60)), m = pack(CW * CH, i => sbyte(mapM[q(i)], 100));
   terrainOf.map = h || r || t || m ? { v: 2, h, r, t, m } : null;
 }
-function loadTerrain(p) {
-  storeTerrain();
-  terrainOf = p; terrainDirty = false;
-  if (!isSolid(p)) return;
-  seaDefault = generateTerrain(p, mapBase);
-  dirtyLo = MAP_H; dirtyHi = -1;
-  mapH.set(mapBase); mapR.fill(0); mapT.fill(0); mapM.fill(0);
+const baseCache = new WeakMap();
+function baseOf(p) { // a planet's terrain as its seed made it, before any hand touched it
+  let b = baseCache.get(p);
+  if (!b || b.kind !== planetKind(p)) { const H = new Float32Array(MAP_N); b = { H, sea: generateTerrain(p, H), kind: planetKind(p) }; baseCache.set(p, b); }
+  return b;
+}
+// lay the hand-made changes over the generated terrain already in H
+function decodeMap(p, H, R, Tm, Mm) {
   if (p.map) try {
     // the first version of these maps was half as fine each way: spread each of its texels over four
     const old = p.map.v !== 2, n = old ? MAP_N / 4 : MAP_N;
@@ -1083,10 +1109,22 @@ function loadTerrain(p) {
       unpack(b64, n, (i, v) => { tmp[i] = v; });
       for (let j = 0, k = 0; j < MAP_H; j++) for (let i = 0; i < MAP_W; i++, k++) put(k, tmp[(j >> 1) * (MAP_W / 2) + (i >> 1)]);
     };
-    each(p.map.h, (i, v) => { mapH[i] = clampH(mapBase[i] + unsbyte(v) / 80); });
-    each(p.map.r, (i, v) => { mapR[i] = v / 15; });
-    coarse(p.map.t, mapT, 60); coarse(p.map.m, mapM, 100);
+    each(p.map.h, (i, v) => { H[i] = clampH(H[i] + unsbyte(v) / 80); });
+    if (R) each(p.map.r, (i, v) => { R[i] = v / 15; });
+    coarse(p.map.t, Tm, 60); coarse(p.map.m, Mm, 100);
   } catch (err) { console.warn('Could not restore this planet\'s terrain:', err); }
+  for (const c of p.scars) stampCrater(H, c[0], c[1], c[2], c[3]);
+}
+function loadTerrain(p) {
+  storeTerrain();
+  terrainOf = p; terrainDirty = false;
+  if (!isSolid(p)) return;
+  const b = baseOf(p);
+  seaDefault = b.sea; mapBase.set(b.H);
+  dirtyLo = MAP_H; dirtyHi = -1;
+  mapH.set(mapBase); mapR.fill(0); mapT.fill(0); mapM.fill(0);
+  decodeMap(p, mapH, mapR, mapT, mapM);
+  if (p.scars.length) { p.scars.length = 0; terrainDirty = true; markDirty(); } // those craters are part of the map from now on
   syncMap(true);
 }
 const seaOf = p => (p.sea == null ? seaDefault : p.sea);
@@ -1102,14 +1140,14 @@ const col3 = (r, g, b) => ({ value: new THREE.Color().setRGB(r, g, b) });
 const globeMat = new THREE.ShaderMaterial({
   uniforms: { uMap: { value: mapTex }, uRot: { value: new THREE.Matrix3() }, uLight: { value: new THREE.Vector3(0, 0, 1) },
     uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 }, uKind: { value: 0 }, uSea: { value: 0 }, uBase: { value: -1.5 }, uTemp: { value: 0 }, uLife: { value: 0 },
-    uCloud: { value: 0 }, uRing: { value: 0 }, uTilt: { value: 0 }, uBands: { value: 9 }, uWind: { value: 1 },
+    uCloud: { value: 0 }, uGreen: { value: 0 }, uSeaLife: { value: 0 }, uCiv: { value: 0 }, uWet: { value: 0 }, uCivCol: col3(1, 0.8, 0.5), uRing: { value: 0 }, uTilt: { value: 0 }, uBands: { value: 9 }, uWind: { value: 1 },
     uDeep: col3(0, 0, 0), uShallow: col3(0, 0, 0), uSand: col3(0, 0, 0), uLow: col3(0, 0, 0), uForest: col3(0, 0, 0), uHigh: col3(0, 0, 0), uPeak: col3(1, 1, 1), uAtm: col3(0, 0, 0),
     uSpots: { value: Array.from({ length: SPOT_MAX }, () => new THREE.Vector4()) } },
   vertexShader: QUAD_VERT,
   fragmentShader: /* glsl */`
     varying vec2 vUv;
-    uniform sampler2D uMap; uniform mat3 uRot; uniform vec3 uLight, uDeep, uShallow, uSand, uLow, uForest, uHigh, uPeak, uAtm;
-    uniform float uTime, uSeed, uAlpha, uKind, uSea, uBase, uTemp, uLife, uCloud, uRing, uTilt, uBands, uWind;
+    uniform sampler2D uMap; uniform mat3 uRot; uniform vec3 uLight, uDeep, uShallow, uSand, uLow, uForest, uHigh, uPeak, uAtm, uCivCol;
+    uniform float uTime, uSeed, uAlpha, uKind, uSea, uBase, uTemp, uLife, uCloud, uRing, uTilt, uBands, uWind, uGreen, uSeaLife, uCiv, uWet;
     uniform vec4 uSpots[${SPOT_MAX}];
     ${NOISE3_GLSL}
     void main(){
@@ -1119,7 +1157,7 @@ const globeMat = new THREE.ShaderMaterial({
       vec2 q = p / R; float z = sqrt(max(0.0, 1.0 - dot(q, q)));
       vec3 m = uRot * vec3(q, z), Lp = uRot * uLight;          // this point, and the sun, in the planet's own frame
       float lat = asin(clamp(m.y, -1.0, 1.0)), lon = atan(m.x, m.z);
-      vec3 col, N = m; float spec = 0.0;
+      vec3 col, N = m; float spec = 0.0, lights = 0.0;
       if (uKind < 0.5) {
         vec2 uv = vec2(lon / 6.2831853 + 0.5, lat / 3.14159265 + 0.5);
         vec4 t = texture2D(uMap, uv);
@@ -1133,11 +1171,12 @@ const globeMat = new THREE.ShaderMaterial({
         // Climate: warm at the equator, cold at the poles and on the heights; damp here, dry there. Both can
         // be pushed either way by hand (the map's third and fourth channels).
         float warm = 1.0 - abs(lat) / 1.35 + uTemp + t.b + (fine - 0.5) * 0.18;
-        float damp = clamp(fbm3(m * 2.6 + uSeed + 11.0) * 1.3 - 0.15 + t.a * 0.7, 0.0, 1.0);
+        float damp = clamp(fbm3(m * 2.6 + uSeed + 11.0) * 1.3 - 0.15 + (t.a + uWet) * 0.7, 0.0, 1.0);
         float frost;
         bool wet = depth > 0.0 || t.g > 0.5;
         if (wet) {                                                // sea, lake or river
           col = mix(uShallow, uDeep, smoothstep(0.0, 0.3, depth));
+          col = mix(col, vec3(0.05, 0.32, 0.22), uSeaLife * 0.3 * smoothstep(0.3, 0.0, depth));   // living shallows
           col = mix(col, vec3(0.6, 0.72, 0.78), smoothstep(0.014, 0.0, depth) * step(0.0, depth) * 0.4);   // surf along the shore
           spec = pow(max(0.0, dot(m, normalize(Lp + uRot * vec3(0.0, 0.0, 1.0)))), 220.0) * 0.45;
           float cold = smoothstep(0.22, -0.06, warm);             // open water, then drifting icebergs, then solid pack ice
@@ -1147,12 +1186,21 @@ const globeMat = new THREE.ShaderMaterial({
           col = mix(uSand, uLow, smoothstep(0.28, 0.5, damp));    // dry sand, bare earth, dark damp ground (nothing grows here yet)
           col = mix(col, uForest, smoothstep(0.6, 0.85, damp));
           col = mix(col, vec3(0.3, 0.28, 0.22), smoothstep(0.3, 0.05, air) * uLife);      // tundra
+          col = mix(col, vec3(0.33, 0.17, 0.1), smoothstep(1.45, 1.9, air) * 0.7);        // scorched ground, too close to the star
           if (uSea > uBase) col = mix(col, vec3(0.55, 0.47, 0.3), smoothstep(0.03, 0.0, el) * 0.8);   // beaches
           col = mix(col, uHigh, smoothstep(0.16, 0.45, el + (fine - 0.5) * 0.1));          // bare rock on the heights
+          // Life, where it has taken hold: green wherever the land is mild and watered, and then the towns.
+          float suit = smoothstep(0.02, 0.2, air) * (1.0 - smoothstep(1.3, 1.7, air)) * smoothstep(-0.1, 0.25, damp) * (1.0 - smoothstep(0.2, 0.45, el));
+          float veg = smoothstep(1.0 - uGreen * 1.15, 1.12 - uGreen * 1.15, suit * 0.75 + fine * 0.3) * step(0.001, uGreen);
+          col = mix(col, mix(vec3(0.17, 0.3, 0.07), vec3(0.03, 0.13, 0.04), smoothstep(0.4, 0.9, damp)), veg * 0.9);
+          float town = smoothstep(1.0 - uCiv * 0.7, 1.06 - uCiv * 0.7, suit * 0.6 + fbm3(m * 7.0 + uSeed + 5.0) * 0.5) * step(0.001, uCiv);
+          col = mix(col, vec3(0.42, 0.4, 0.37), town * 0.3 * step(0.55, grit));
+          lights = step(0.8, noise3(m * 150.0 + uSeed)) * town;
           col *= 0.82 + 0.3 * fine + 0.14 * (grit - 0.5);
           vec3 east = normalize(vec3(m.z, 0.0, -m.x) + 1e-5), north = cross(m, east);
           N = normalize(m - 0.1 * (east * gE + north * gN));     // slopes catch the light
           frost = smoothstep(0.02, -0.07, air + (grit - 0.5) * 0.1);
+          lights *= 1.0 - frost;
         }
         col = mix(col, uPeak, frost); spec *= 1.0 - frost;
       } else {                                                    // a giant: bands of cloud sliding past each other
@@ -1174,7 +1222,7 @@ const globeMat = new THREE.ShaderMaterial({
         }
       }
       float sun = dot(m, Lp), day = smoothstep(-0.06, 0.16, sun);
-      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day;
+      col = col * (0.07 + 0.93 * pow(max(0.0, dot(N, Lp)), 0.8) * day) + spec * day + uCivCol * lights * (1.0 - day) * 0.9;
       float ca = cos(uTime * 0.012), sa = sin(uTime * 0.012);      // weather drifting over it all
       float cloud = smoothstep(0.5, 0.72, fbm3(vec3(m.x * ca - m.z * sa, m.y, m.x * sa + m.z * ca) * 3.2 + uSeed * 1.7)) * uCloud;
       col = mix(col, vec3(0.07 + 0.93 * max(0.0, sun)), cloud);
@@ -1210,16 +1258,20 @@ function globeLook(p, u) {
   if (kind === 'ocean') {
     u.uDeep.value.copy(c[0]).multiplyScalar(0.45); u.uShallow.value.copy(c[0]).lerp(SEA_SHALLOW, 0.5); u.uSand.value.copy(SAND);
     u.uLow.value.copy(c[1]); u.uForest.value.copy(c[1]).multiplyScalar(0.55); u.uHigh.value.copy(ROCK_HIGH); u.uPeak.value.copy(WHITE); u.uAtm.value.copy(SKY);
-    u.uTemp.value = 0.05; u.uLife.value = 1; u.uCloud.value = 0.6; u.uBase.value = SEA_MIN;
+    u.uTemp.value = baseTemp(p); u.uLife.value = 1; u.uCloud.value = 0.6; u.uBase.value = SEA_MIN;
   } else if (kind === 'rock') { // dry to begin with, but it will hold water if you give it some
     u.uDeep.value.copy(SEA_DEEP); u.uShallow.value.copy(SEA_SHALLOW); u.uSand.value.copy(c[0]).lerp(c[2], 0.3);
     u.uLow.value.copy(c[0]); u.uForest.value.copy(c[0]).multiplyScalar(0.7); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]).lerp(WHITE, 0.6); u.uAtm.value.copy(c[2]).multiplyScalar(0.25);
-    u.uTemp.value = p.seed % 3 ? -0.1 : 0.8; u.uLife.value = 0; u.uCloud.value = 0; u.uBase.value = -0.2; // most have a polar cap, some are too hot for one
+    u.uTemp.value = baseTemp(p); u.uLife.value = 0; u.uCloud.value = 0; u.uBase.value = -0.2;
   } else {
     u.uLow.value.copy(c[0]); u.uHigh.value.copy(c[1]); u.uPeak.value.copy(c[2]); u.uAtm.value.copy(c[1]).multiplyScalar(0.6);
     u.uBands.value = kind === 'ice' ? 5 + (p.seed % 3) : 8 + (p.seed % 5); u.uCloud.value = 0; u.uWind.value = p.wind ?? 1;
     u.uSpots.value.forEach((v, i) => { const s = p.spots[i]; if (s) v.set(s[0], s[1], s[2], s[3]); else v.set(0, 0, 0, 0); });
   }
+  const L = isSolid(p) ? p.life : null, ev = L && L.ev ? DISASTERS[L.ev.k] : null; // what lives here, and what the universe is doing to it
+  u.uGreen.value = L ? L.g : 0; u.uSeaLife.value = L && L.s ? 1 : 0; u.uCiv.value = L ? L.c : 0; u.uWet.value = (ev ? ev[2] : 0) + seaWet(L ? L.w : null);
+  faithColor(L ? L.f : 0, u.uCivCol.value);
+  if (ev) u.uTemp.value += ev[1];
 }
 
 // The globe's orientation is the planet's frame seen from here. One open hand drags it round; left alone it turns on its axis.
@@ -1235,7 +1287,7 @@ function globePoint(x, y) {
   at.lon = Math.atan2(_gv.x, _gv.z); at.lat = Math.asin(Math.max(-1, Math.min(1, _gv.y)));
   return true;
 }
-function touched(now) { globeBusy = now; terrainDirty = true; markDirty(); }
+function touched(now) { globeBusy = now; terrainDirty = true; markDirty(); if (focusP && focusP.life) focusP.life.acted = 1; }
 function dust(x, y, n, r, g, b) { for (let i = 0; i < n; i++) spawn(x + rnd(0.1), y + rnd(0.1), 0, rnd(0.8), rnd(0.8) + 0.3, 0, r, g, b, 0.3 + Math.random() * 0.5, 0.04 + Math.random() * 0.04); }
 
 const _gc = new THREE.Vector3();
@@ -1276,7 +1328,7 @@ function planetDig(hand, now, dt) {
   if (!p || !isSolid(p) || hand.charge >= T.minCharge || !globePoint(hand.pos.x, hand.pos.y)) return false;
   brush(at.lon, at.lat, 0.16, (k, d) => { const w = 1 - d * d; mapH[k] = clampH(mapH[k] - dt * 0.3 * w * w); });
   dust(hand.pos.x, hand.pos.y, 2, 0.4, 0.36, 0.32);
-  touched(now);
+  touched(now); smite(p, dt * 0.03);
   return true;
 }
 // Two fingers rested on the land take you down to stand there. Moving them only moves where that will be.
@@ -1292,24 +1344,32 @@ function planetPeace(hand, now) {
   for (let i = 0; i < 3; i++) { const a = Math.random() * TAU, d = 0.5 * (1 - Math.min(1, k)) + 0.08; spawn(tip.x + Math.cos(a) * d, tip.y + Math.sin(a) * d, 0, 0, 0, 0, cr, cg, cb, 0.25, 0.05); } // a ring closing in
   if (k >= 1) { hand.rest = null; enterLand(at.lon, at.lat); }
 }
-// A pointing finger rested on one spot changes the climate around it, and goes on to the next kind for as
-// long as it stays: [name, warmer or colder, wetter or drier].
-const CLIMATES = [['Snow and ice', -1.3, 0.2], ['Thaw', 0.9, 0], ['Desert', 0.6, -1], ['As it was', 0, 0]];
+// A pointing finger rested on one spot freezes it, or thaws it if it was frozen already. Which one is settled
+// by what lies under the fingertip when the hold completes, and stays that way for as long as the finger rests.
 function planetClimate(hand, now, dt) {
   const p = focusP, tip = hand.tips[1];
   if (!p || !isSolid(p) || !globePoint(tip.x, tip.y)) { hand.dwell = null; return false; }
   globeBusy = now;
   dirOf(at.lon, at.lat, _gc);
   const d = hand.dwell;
-  if (!d || d.v.dot(_gc) < Math.cos(0.14)) { hand.dwell = { v: _gc.clone(), lon: at.lon, lat: at.lat, t: now, step: -1 }; return true; } // it moved: start again there
-  const since = now - d.t - T.climateHold;
+  if (!d || d.v.dot(_gc) < Math.cos(0.14)) { hand.dwell = { v: _gc.clone(), lon: at.lon, lat: at.lat, t: now, step: -1, melt: false }; return true; } // it moved: start again there
   pickColor(0.7);
   spawn(tip.x + rnd(0.25), tip.y + rnd(0.25), 0, 0, 0, 0, cr, cg, cb, 0.3, 0.03 + 0.05 * Math.min(1, (now - d.t) / T.climateHold)); // gathering
-  if (since < 0) return true;
-  const n = Math.floor(since / T.climateStep);
-  if (n > d.step) { d.step = n; note(CLIMATES[n % CLIMATES.length][0], 2); }
-  const c = CLIMATES[d.step % CLIMATES.length], rate = Math.min(1, dt * 5);
-  brush(d.lon, d.lat, 0.4, (k, q) => { const w = 1 - q * q, f = w * w * rate; mapT[k] += (c[1] - mapT[k]) * f; mapM[k] += (c[2] - mapM[k]) * f; });
+  if (now - d.t < T.climateHold) return true;
+  const g = globeMat.uniforms, sea = seaOf(p), ground = Math.max(sea, g.uBase.value), temp = g.uTemp.value;
+  // how warm a cell would be with no help from you: the air on land, the water at sea
+  const bare = k => 1 - Math.abs((((k / MAP_W) | 0) + 0.5) / MAP_H - 0.5) * Math.PI / 1.35 + temp - Math.max(0, mapH[k] - ground) * 0.9;
+  if (d.step < 0) {
+    const j = Math.max(0, Math.min(MAP_H - 1, Math.floor((d.lat / Math.PI + 0.5) * MAP_H))), i = ((Math.floor((d.lon / TAU + 0.5) * MAP_W) % MAP_W) + MAP_W) % MAP_W, k = j * MAP_W + i;
+    d.melt = bare(k) + mapT[k] < (mapH[k] < sea ? 0.08 : 0);
+    d.step = 0; note(d.melt ? 'Thaw' : 'Ice', 2);
+  }
+  const rate = Math.min(1, dt * 5);
+  brush(d.lon, d.lat, 0.4, (k, q) => {
+    const w = 1 - q * q, f = w * w * rate, base = bare(k);
+    if (d.melt) { const to = Math.max(0, 0.35 - base); if (mapT[k] < to) mapT[k] += (to - mapT[k]) * f; }  // only as warm as it takes to clear the ice
+    else { const to = Math.min(0, -0.3 - base); if (mapT[k] > to) mapT[k] += (to - mapT[k]) * f; }
+  });
   touched(now);
   return true;
 }
@@ -1317,7 +1377,7 @@ function planetClimate(hand, now, dt) {
 function planetImpact(pt, power, now) {
   const p = focusP;
   if (!p || !globePoint(pt.x, pt.y)) return;
-  if (isSolid(p)) stampCrater(mapH, at.lon, at.lat, 0.07 + 0.2 * power, 0.14 + 0.3 * power);
+  if (isSolid(p)) { stampCrater(mapH, at.lon, at.lat, 0.07 + 0.2 * power, 0.14 + 0.3 * power); smite(p, 0.15 + 0.3 * power); }
   else { p.spots.push([at.lon, at.lat, 0.05 + 0.12 * power, 1]); if (p.spots.length > SPOT_MAX) p.spots.shift(); }
   touched(now);
 }
@@ -1356,30 +1416,149 @@ function updateGlobe(dt, now, px, py, radius, lx, ly) {
   globe.visible = true; globe.position.set(px, py, 0); globe.scale.setScalar(radius * 5);
 }
 
+// ---------------------------------------------------------------- life
+// You set the conditions; life takes it from there. Where a world has open water that is neither frozen nor
+// boiling, microbes appear in its seas; given temperate, watered land they become plants, then animals, then
+// people. The people judge you by what your hands do to their world. And the universe has plans of its own:
+// meteors, ice ages, heat and drought arrive unasked, and it is for you to put right or not.
+const STAGE_SECS = [50, 80, 110, 150]; // seconds each step takes on a perfectly hospitable world
+const STAGE_SHORT = ['', 'Microbes', 'Plants', 'Animals', 'Civilization'];
+const STAGE_NEWS = ['', 'Life has begun in the seas', 'Plants are spreading over the land', 'Animals now roam', 'A civilization has arisen'];
+const DISASTERS = [['An ice age', -0.55, 0], ['A heat wave', 0.65, -0.3], ['A drought', 0.1, -0.7]]; // name, warmer or colder, wetter or drier
+const lifeOf = p => p.life || (p.life = { s: 0, t: 0, g: 0, c: 0, f: 0, hs: 0, hl: 0, ev: null, stale: true, acted: 0 });
+const mood = f => (f > 0.6 ? 'They worship you' : f > 0.2 ? 'They love you' : f < -0.6 ? 'They live in terror of you' : f < -0.2 ? 'They fear you' : 'They are unsure of you');
+function faithColor(f, out) { return f >= 0 ? out.setRGB(1, 0.86 - 0.12 * f, 0.62 - 0.34 * f) : out.setRGB(1, 0.86 + 0.78 * f, 0.62 + 0.6 * f); } // lamplight: gold where you are loved, red where you are feared
+
+// How welcoming a world is: for its seas (open water, not frozen, not boiling) and for its land (temperate and
+// watered, with a sea somewhere to feed the rain). Read off its map, a sample every few cells.
+function habitability(H, Tm, Mm, sea, p, dT, dM) {
+  const rock = planetKind(p) === 'rock', temp = baseTemp(p) + dT, ground = Math.max(sea, rock ? -0.2 : SEA_MIN);
+  let land = 0, good = 0, wet = 0, live = 0, all = 0;
+  for (let j = 2; j < MAP_H; j += 4) for (let i = 2; i < MAP_W; i += 4) { all += rowCos[j]; if (H[j * MAP_W + i] < sea) wet += rowCos[j]; }
+  const share = wet / all; dM += seaWet(share); wet = all = 0;
+  for (let j = 2; j < MAP_H; j += 4) {
+    const w = rowCos[j], lat = ((j + 0.5) / MAP_H - 0.5) * Math.PI;
+    for (let i = 2; i < MAP_W; i += 4) {
+      const k = j * MAP_W + i, h = H[k], warm = 1 - Math.abs(lat) / 1.35 + temp + Tm[k];
+      all += w;
+      if (h < sea) { wet += w; if (warm > 0.2 && warm < 1.9) live += w; continue; }
+      const air = warm - (h - ground) * 0.9;
+      land += w;
+      good += w * clamp01((air - 0.02) / 0.25) * clamp01((1.7 - air) / 0.4) * clamp01(0.55 + (Mm[k] + dM) * 0.8);
+    }
+  }
+  const W = wet / all, Ld = land / all;
+  return { w: share, sea: wet ? live / wet * Math.min(1, W * 5) : 0, land: land ? good / land * Math.min(1, W * 6) * Math.min(1, Ld * 6) : 0 };
+}
+const sH = new Float32Array(MAP_N), sT = new Float32Array(MAP_N), sM = new Float32Array(MAP_N); // somewhere to unfold a world we are not looking at
+function measureLife(p) {
+  const L = lifeOf(p), ev = L.ev ? DISASTERS[L.ev.k] : null;
+  let r;
+  if (terrainOf === p) r = habitability(mapH, mapT, mapM, seaOf(p), p, ev ? ev[1] : 0, ev ? ev[2] : 0);
+  else {
+    const b = baseOf(p);
+    sH.set(b.H); sT.fill(0); sM.fill(0);
+    decodeMap(p, sH, null, sT, sM);
+    r = habitability(sH, sT, sM, p.sea == null ? b.sea : p.sea, p, ev ? ev[1] : 0, ev ? ev[2] : 0);
+  }
+  L.hs = r.sea; L.hl = r.land; L.w = r.w; L.stale = false;
+}
+// "on the ocean world of a yellow star", or just "here"
+const placeOf = (p, s) => (p === focusP && level >= 3 ? 'here' : `on ${properName(p.seed)}${s === focusS && level >= 2 ? '' : ', a world of ' + properName(s.seed)}`);
+const lifeLabel = p => { const L = p.life; return !L || !isSolid(p) ? '' : (L.s === 4 ? ' · ' + mood(L.f) : L.s ? ' · ' + STAGE_SHORT[L.s] : '') + (L.ev ? ' · ' + DISASTERS[L.ev.k][0].replace(/^An? /, '') : ''); };
+// they noticed that, and did not like it
+function smite(p, amt) {
+  const L = p && p.life;
+  if (!L || L.s < 4) return;
+  L.f = Math.max(-1, L.f - amt); L.c *= 1 - amt * 0.3; markDirty();
+}
+
+let lifeT = 0, nextDisaster = 100 + Math.random() * 80;
+function updateLife(dt) {
+  if (!entered || (lifeT += dt * T.lifeSpeed) < 1) return;
+  const step = lifeT; lifeT = 0;
+  let budget = 1; // unfolding a world we are not on is not free: one a tick is plenty
+  const living = [];
+  for (const g of galaxies) if (g.alive) for (const s of g.stars) for (const p of s.planets) {
+    if (!isSolid(p) || p.growing || p.isNew) continue;
+    p.sun = s;
+    const L = lifeOf(p), here = terrainOf === p, heat = orbitHeat(p);
+    if (L.oh == null) L.oh = heat;
+    const moved = !p.held && Math.abs(heat - L.oh) > 0.03 ? heat - L.oh : 0;
+    if (moved) { L.oh = heat; note(`${properName(p.seed)} grows ${moved > 0 ? 'warmer' : 'colder'}`, 4); }
+    if (L.ev && (L.ev.left -= step) <= 0) { const was = DISASTERS[L.ev.k][0]; L.ev = null; L.stale = true; if (L.s) note(`${was} is over ${placeOf(p, s)}`, 5); }
+    if ((L.acted && here) || moved) { // your hand has been at work here: is the world better for it, or worse?
+      const before = L.hl;
+      measureLife(p); L.acted = 0;
+      if (L.s === 4) L.f = THREE.MathUtils.clamp(L.f + (L.hl - before) * (moved ? 5 : 10), -1, 1);
+    } else if (L.stale) { if (!here && budget-- <= 0) continue; measureLife(p); }
+    const h = L.s <= 1 ? L.hs : L.hl, up = L.s === 0 ? L.hs : L.hl; // the seas keep microbes going; anything more needs land
+    if (h < 0.06) L.t -= step / 25;
+    else if (L.s < 4 && up >= 0.06) L.t += step * clamp01(up * 2.2) / STAGE_SECS[L.s];
+    else if (L.t < 0) L.t = Math.min(0, L.t + step / 25);
+    if (L.t >= 1) { L.s++; L.t = 0; note(`${STAGE_NEWS[L.s]} ${placeOf(p, s)}`, 7); markDirty(); }
+    else if (L.t < 0) {
+      if (L.s > 0 && L.t > -1) { /* hard times, but they hang on a while yet */ }
+      else if (L.s > 0) { L.s--; L.t = 0.5; note(L.s ? `Life is dying back ${placeOf(p, s)}` : `Life has died out ${placeOf(p, s)}`, 7); markDirty(); }
+      else L.t = 0;
+    }
+    const gTo = L.s >= 2 ? clamp01(L.hl * 1.6) : 0, cTo = L.s === 4 ? clamp01(L.hl * 1.5) * (0.65 + 0.35 * L.f) : 0;
+    L.g += THREE.MathUtils.clamp(gTo - L.g, -step / 40, step / 90);
+    L.c += THREE.MathUtils.clamp(cTo - L.c, -step / 30, step / 120);
+    if (L.s === 4) L.f *= 1 - step / 1200; else L.f = 0; // the generations slowly forget
+    if (L.s) living.push([p, s]);
+  }
+  if ((nextDisaster -= step) <= 0 && living.length && settings.disasters) {
+    nextDisaster = 90 + Math.random() * 120;
+    const [p, s] = living[(Math.random() * living.length) | 0], L = p.life;
+    if (Math.random() < 0.35) { // a meteor nobody threw
+      const c = [(Math.random() - 0.5) * TAU, Math.asin(Math.random() * 2 - 1), 0.09 + Math.random() * 0.1, 0.25 + Math.random() * 0.2];
+      if (terrainOf === p) { stampCrater(mapH, c[0], c[1], c[2], c[3]); terrainDirty = true; } else p.scars.push(c);
+      L.t -= 0.3; L.g *= 0.8; L.c *= 0.6; L.stale = true;
+      note(`A meteor has fallen ${placeOf(p, s)}`, 7);
+    } else if (!L.ev) {
+      L.ev = { k: (Math.random() * DISASTERS.length) | 0, left: 150 }; L.stale = true;
+      note(`${DISASTERS[L.ev.k][0]} has begun ${placeOf(p, s)}`, 7);
+    }
+    markDirty();
+  }
+  const t = whereText();
+  if (whereEl.textContent !== t) whereEl.textContent = t;
+}
+function whereText() {
+  const gal = focusG ? titleOf(focusG) : 'Galaxy';
+  return level === 0 ? 'Universe' : level === 1 ? `Universe › ${gal}`
+    : `Universe › ${gal} › ${focusS ? titleOf(focusS) : 'Star'}${level >= 3 && focusP ? ' › ' + titleOf(focusP) + lifeLabel(focusP) : ''}${level === 4 && land ? ' › ' + land.name : ''}`;
+}
+
 // ---------------------------------------------------------------- down on the surface
 // Two fingers rested on a spot of a planet take you down inside its air, to stand in that place: its heights,
 // its water, its cold and its damp are read off the planet's map there and painted as a landscape.
 const WEATHER = [['Clear skies', 0.12, 0, 0], ['Clouds', 0.62, 0, 0], ['Storm', 1, 1, 0.2], ['Mist', 0.4, 0, 1]]; // name, cloud, rain, fog
 const LAND_M = 1.25, LAND_H0 = 0.44; // the picture overfills the screen by this much; where its horizon sits
+const LAND_TURN = 7.2; // in screen heights: a full turn on the spot is about four screens wide
+const wrapTurn = x => x - LAND_TURN * Math.round(x / LAND_TURN);
 const landMat = new THREE.ShaderMaterial({
   uniforms: { uTime: { value: 0 }, uSeed: { value: 0 }, uAlpha: { value: 0 }, uAspect: { value: 1.7 }, uRelief: { value: 0.5 }, uWater: { value: 0 }, uCold: { value: 0 },
     uAirT: { value: 0.5 }, uDamp: { value: 0.5 }, uPan: { value: 0 }, uCloud: { value: 0.2 }, uRain: { value: 0 }, uFog: { value: 0 }, uFlash: { value: 0 }, uBoltX: { value: 0 },
-    uRing: { value: 0 }, uMoons: { value: 0 }, uAir: { value: 1 }, uSnowing: { value: 0 }, uSun: { value: new THREE.Vector2(0.4, 0.72) },
+    uVeg: { value: 0 }, uCivL: { value: 0 }, uCivCol: col3(1, 0.8, 0.5), uRing: { value: 0 }, uMoons: { value: 0 }, uAir: { value: 1 }, uSnowing: { value: 0 }, uSun: { value: new THREE.Vector2(0.4, 0.72) },
     uDeep: col3(0, 0, 0), uShallow: col3(0, 0, 0), uSand: col3(0, 0, 0), uLow: col3(0, 0, 0), uForest: col3(0, 0, 0), uHigh: col3(0, 0, 0), uPeak: col3(1, 1, 1), uAtm: col3(0, 0, 0) },
   vertexShader: QUAD_VERT,
   fragmentShader: /* glsl */`
     varying vec2 vUv;
-    uniform float uTime, uSeed, uAlpha, uAspect, uRelief, uWater, uCold, uAirT, uDamp, uPan, uCloud, uRain, uFog, uFlash, uBoltX, uRing, uMoons, uAir, uSnowing;
+    uniform float uTime, uSeed, uAlpha, uAspect, uRelief, uWater, uCold, uAirT, uDamp, uPan, uCloud, uRain, uFog, uFlash, uBoltX, uRing, uMoons, uAir, uSnowing, uVeg, uCivL;
     uniform vec2 uSun;
-    uniform vec3 uDeep, uShallow, uSand, uLow, uForest, uHigh, uPeak, uAtm;
+    uniform vec3 uDeep, uShallow, uSand, uLow, uForest, uHigh, uPeak, uAtm, uCivCol;
     ${NOISE_GLSL}
-    const float H0 = ${LAND_H0};
-    float gDay, gDusk, gSh; vec3 gTint, gLight, gHz;
+    const float H0 = ${LAND_H0}, TURN = ${LAND_TURN.toFixed(2)};      // TURN: how far the picture slides in one full turn on the spot
+    float gDay, gDusk, gSh, gHot; vec3 gTint, gLight, gHz;
+    float wrapT(float x){ return x - TURN * floor(x / TURN + 0.5); }
 
     // the skyline of one range of hills: rolling where the land is gentle, sharp where it is mountainous
     float crags(vec2 p){ float v = 0.0, a = 0.55; for (int i = 0; i < 4; i++) { float n = 1.0 - abs(2.0 * noise(p) - 1.0); v += a * n * n; p = p * 2.1 + 13.0; a *= 0.5; } return v; }
-    float ridge(float x, float i){
-      vec2 q = vec2(x, i * 17.3 + uSeed);
+    float ridge(float x, float i, float fq){                     // x is a bearing: the skyline is read round a circle, so it meets itself
+      float th = x * 6.2831853 / TURN, R = TURN * fq / 6.2831853;
+      vec2 q = vec2(cos(th), sin(th)) * R + vec2(i * 17.3 + uSeed, i * 7.31);
       float a = fbm(q);
       return mix(a, a * 0.3 + crags(q * 0.8 + 31.7) * 0.75, uRelief);
     }
@@ -1388,12 +1567,13 @@ const landMat = new THREE.ShaderMaterial({
       float f = i / 5.0, fq = mix(2.4, 1.0, f);
       float base = H0 - f * f * 0.34 - 0.004;
       float amp = (uRelief * mix(0.42, 0.2, f) + 0.075 * (1.0 - smoothstep(0.85, 1.0, uWater))) * (1.0 - 0.45 * f * (1.0 - uRelief));
-      float px = p.x * fq + uPan * mix(0.15, 0.8, f) + i * 7.31;
-      float r0 = ridge(px, i), below = base + amp * r0 - p.y;
+      float wx = p.x + uPan, px = wx * fq + i * 7.31;
+      float r0 = ridge(wx, i, fq), below = base + amp * r0 - p.y;
+      below += uVeg * 0.012 * noise(vec2(px * 140.0, i)) * step(0.35, noise(vec2(px * 9.0, i + 3.0)));   // treetops along the skyline
       if (below <= 0.0) return vec4(0.0);
       // Which flank is this? Look at the skyline a little way toward the sun: if it falls away, this side faces it.
       float sgn = clamp((uSun.x - p.x) * 3.0, -1.0, 1.0);
-      float r1 = ridge(px + sgn * (0.03 + below * 1.3) * fq, i);
+      float r1 = ridge(wx + sgn * (0.03 + below * 1.3), i, fq);
       float side = mix(0.5, smoothstep(-0.014, 0.014, (r0 - r1) * amp), abs(sgn));
       side = mix(side, 0.75, 0.5 * smoothstep(0.1, 0.45, gSh));    // a high sun lights both flanks
       float alt = (clamp((p.y - base) / max(amp, 1e-3), 0.0, 1.0) - 0.35) * uRelief * 0.7;   // above or below where you stand
@@ -1402,20 +1582,34 @@ const landMat = new THREE.ShaderMaterial({
       vec3 g = mix(uSand, uLow, smoothstep(0.28, 0.5, damp));
       g = mix(g, uForest, smoothstep(0.6, 0.85, damp));
       g = mix(g, uHigh, smoothstep(0.02, 0.22, alt + (n - 0.5) * 0.2));
+      g = mix(g, mix(vec3(0.2, 0.34, 0.08), vec3(0.04, 0.15, 0.05), smoothstep(0.4, 0.9, damp)), (1.0 - smoothstep(0.08, 0.2, alt)) * smoothstep(0.5, 0.75, n * 0.5 + uVeg * 0.75));
       g = mix(g, uPeak, smoothstep(0.02, -0.05, uAirT - alt * 0.9 + (n2 - 0.5) * 0.14));
+      g = mix(g, mix(vec3(0.07, 0.05, 0.05), vec3(0.34, 0.13, 0.06), n), gHot * 0.88);   // burnt black and rust
       g *= (0.38 + 0.8 * side) * (0.72 + 0.3 * n + 0.3 * n2);
       float hz = clamp((1.0 - f * 1.15) * 0.6 + uFog * 0.5 * (1.0 - f * 0.4), 0.0, 0.97);
-      return vec4(mix(g * gLight, gHz, hz), 1.0);
+      vec3 c = mix(g * gLight, gHz, hz);
+      if (gHot > 0.0) {                                           // fire in the cracks of the ground
+        float v = fbm(vec2(px * 9.0, below * 26.0 + i * 5.0));
+        float crack = smoothstep(0.035, 0.0, abs(v - 0.5)) * smoothstep(0.3, 0.7, fbm(vec2(px * 2.0 + 9.0, below * 5.0 + i)));
+        c += vec3(1.0, 0.32, 0.05) * crack * gHot * (0.55 + 0.25 * sin(uTime * 1.3 + v * 40.0)) * (1.0 - hz * 0.7) * (1.6 - gDay);
+      }
+      if (uCivL > 0.0 && i > 1.5) {                               // lamps in the windows of whoever lives here
+        vec2 q = vec2(px * 120.0, below * 170.0), id = floor(q);
+        float lit = step(1.0 - uCivL * 0.16, hash(id + i)) * smoothstep(0.3, 0.1, length(fract(q) - 0.5));
+        lit *= smoothstep(0.012, 0.03, below) * smoothstep(0.11, 0.06, below) * step(0.55, noise(vec2(px * 2.2, i * 5.0)));
+        c += uCivCol * lit * (1.0 - 0.97 * gDay) * 1.6;
+      }
+      return vec4(c, 1.0);
     }
     // the sky and everything standing against it
     vec3 world(vec2 p){
       float up = clamp((p.y - H0) / (1.0 - H0), 0.0, 1.0);
-      vec3 hor = mix(uAtm, vec3(1.0), 0.45);
-      vec3 sky = mix(hor, uAtm * 0.55, pow(up, 0.55)) * (0.03 + 0.97 * gDay) + vec3(0.008, 0.012, 0.03);
+      vec3 hor = mix(mix(uAtm, vec3(1.0), 0.45), vec3(1.0, 0.62, 0.3), gHot * 0.8);
+      vec3 sky = mix(hor, mix(uAtm * 0.55, vec3(0.5, 0.2, 0.08), gHot * 0.8), pow(up, 0.55)) * (0.03 + 0.97 * gDay) + vec3(0.008, 0.012, 0.03) + vec3(0.1, 0.03, 0.0) * gHot * exp(-up * 5.0);
       float ds = length(p - uSun);
       sky += vec3(1.0, 0.4, 0.12) * gDusk * exp(-up * 3.5) * (0.35 + 0.65 * exp(-abs(p.x - uSun.x) * 1.2));
       float nightVis = 1.0 - gDay * uAir;                         // where the air is thin the stars never quite go out
-      vec2 sg = p * 90.0; float sr = hash(floor(sg) + uSeed);
+      vec2 sg = vec2(p.x + uPan, p.y) * 90.0; float sr = hash(floor(sg) + uSeed);
       sky += step(0.992, sr) * smoothstep(0.35, 0.0, length(fract(sg) - 0.5)) * (0.6 + 0.4 * sin(uTime * 2.0 + sr * 90.0)) * nightVis * 0.9 * (1.0 - uCloud * 0.85);
       if (uRing > 0.0) {                                          // the planet's own rings, arching overhead
         float c = 0.93 - 0.3 * (p.x - 0.2) * (p.x - 0.2), t = (p.y - c) / (0.02 + 0.045 * uRing);
@@ -1425,13 +1619,15 @@ const landMat = new THREE.ShaderMaterial({
         float fi = float(i);
         if (fi >= uMoons) break;
         vec2 mp = vec2(-0.6 + 0.42 * fi + 0.1 * sin(uSeed + fi * 2.0), 0.8 + 0.07 * sin(uSeed * 1.7 + fi * 4.1));
+        mp.x = p.x - wrapT(p.x + uPan - mp.x);                   // where that bearing is on the screen just now
         float mr = 0.02 + 0.014 * hash(vec2(fi, uSeed)), dm = length(p - mp);
         float lit = clamp(0.5 + dot((p - mp) / mr, normalize(uSun - mp)) * 0.9, 0.0, 1.0);
         sky = mix(sky, vec3(0.85, 0.84, 0.8) * (0.12 + 0.88 * lit) * (0.4 + 0.6 * nightVis) + sky * 0.6 * (1.0 - nightVis), smoothstep(mr, mr - 0.004, dm));
       }
-      sky += gTint * (smoothstep(0.034, 0.028, ds) * 3.0 + exp(-ds * 9.0) * 0.45 + exp(-ds * 40.0) * 0.8);
+      float sz = 1.0 + 1.6 * gHot;                                // the star fills more of the sky from in here
+      sky += gTint * (smoothstep(0.034 * sz, 0.028 * sz, ds) * 3.0 + exp(-ds * 9.0 / sz) * 0.45 + exp(-ds * 40.0 / sz) * 0.8);
       float t = 1.0 / (up * 1.6 + 0.12);                          // clouds: a flat ceiling running away to the horizon
-      vec2 cuv = vec2(p.x * t * 0.9 + uPan * 0.6 + uTime * 0.02, t * 1.3) + uSeed;
+      vec2 cuv = vec2((p.x + uPan) * t * 0.9 + uTime * 0.02, t * 1.3) + uSeed;
       float cl = smoothstep(0.72 - uCloud * 0.4, 0.85 - uCloud * 0.4, fbm(cuv)) * smoothstep(0.0, 0.06, up);
       vec3 cc = vec3(0.9, 0.92, 0.96) * (0.06 + 0.94 * gDay);
       cc = mix(cc, gTint * (0.15 + 0.9 * gDay) + vec3(1.0, 0.45, 0.2) * gDusk * 0.8, 0.4 + 0.4 * exp(-ds * 2.5));
@@ -1443,25 +1639,27 @@ const landMat = new THREE.ShaderMaterial({
     }
     void main(){
       vec2 p = vec2((vUv.x - 0.5) * uAspect, vUv.y);
-      gSh = uSun.y - H0;
+      gSh = uSun.y - H0; gHot = smoothstep(1.45, 1.85, uAirT);
+      p.x += sin(p.y * 150.0 + uTime * 7.0) * 0.0016 * gHot * smoothstep(0.25, 0.0, abs(p.y - H0));   // heat shimmer over the ground
       gDay = smoothstep(-0.14, 0.08, gSh);
       gDusk = smoothstep(0.3, 0.0, gSh) * smoothstep(-0.22, -0.02, gSh);
       gTint = mix(vec3(1.0, 0.42, 0.16), vec3(1.0, 0.95, 0.86), smoothstep(-0.02, 0.3, gSh));
       gLight = gTint * (0.05 + 0.95 * gDay) * (1.0 - 0.45 * uRain) + vec3(0.02, 0.03, 0.07);
       gHz = mix(uAtm, vec3(1.0), 0.45) * (0.03 + 0.97 * gDay) + vec3(1.0, 0.4, 0.12) * gDusk * 0.45 + vec3(0.008, 0.012, 0.03);
+      gHz = mix(gHz, vec3(0.9, 0.5, 0.25) * (0.1 + 0.9 * gDay), gHot * 0.7);
       gHz = mix(gHz, vec3(0.6, 0.63, 0.68) * (0.06 + 0.94 * gDay), max(uFog, uRain * 0.5));
       vec3 col = world(p);
       float yW = uWater > 0.0 ? H0 - 0.012 - (1.0 - smoothstep(0.3, 1.0, uWater)) * 0.2 : -1.0;
       if (p.y < yW) {                                             // water: it mirrors the world above, broken by ripples
         float d = yW - p.y, pers = min(40.0, 1.0 / (d + 0.015));
-        float w = noise(vec2(p.x * pers * 1.5 + uPan * 3.0, pers * 2.0 + uTime * 0.6)) - 0.5;
+        float w = noise(vec2((p.x + uPan) * pers * 1.5, pers * 2.0 + uTime * 0.6)) - 0.5;
         vec3 refl = world(vec2(p.x + w * 0.02 * (0.3 + d * 4.0), 2.0 * yW - p.y + w * 0.012));
         vec3 body = mix(uShallow, uDeep, smoothstep(0.0, 0.25, d)) * (0.06 + 0.94 * gDay);
         vec3 wc = mix(body, refl, 0.35 + 0.5 * exp(-d * 6.0));
         float gl = pow(max(0.0, 1.0 - abs(p.x - uSun.x) / (0.05 + d * 0.5)), 2.0) * step(0.55, noise(vec2(p.x * pers * 6.0, pers * 8.0 + uTime * 2.0)));
         wc += gTint * gl * 0.7 * gDay * smoothstep(-0.02, 0.05, gSh) * (1.0 - uCloud * 0.7);
         if (uCold > 0.0) {                                        // drifting ice, thickening to a solid pack
-          vec2 iuv = vec2(p.x * pers * 0.5 + uSeed + uPan, pers * 0.9);
+          vec2 iuv = vec2((p.x + uPan) * pers * 0.5 + uSeed, pers * 0.9);
           float ic = noise(iuv) * 0.6 + noise(iuv * 3.1) * 0.4;
           wc = mix(wc, uPeak * gLight * (0.8 + 0.2 * noise(iuv * 9.0)), smoothstep(0.72 - uCold * 0.7, 0.76 - uCold * 0.7, ic));
         }
@@ -1505,19 +1703,24 @@ function enterLand(lon, lat) {
   const relief = clamp01((hi - Math.max(lo, ground)) / 0.4), wetFrac = wetN / n;
   const warm = 1 - Math.abs(lat) / 1.35 + g.uTemp.value + mapT[k], air = warm - Math.max(0, h - ground) * 0.9;
   dirOf(lon, lat, _gc);
-  const damp = clamp01(noise3(_gc.x * 2.6, _gc.y * 2.6, _gc.z * 2.6, p.seed | 0) * 1.3 - 0.15 + mapM[k] * 0.7);
+  const dampBase = noise3(_gc.x * 2.6, _gc.y * 2.6, _gc.z * 2.6, p.seed | 0) * 1.3 - 0.15, damp = clamp01(dampBase + (mapM[k] + g.uWet.value) * 0.7);
+  const L = p.life, suit = under ? 0 : clamp01((air - 0.02) / 0.2) * clamp01((1.7 - air) / 0.4) * clamp01((damp + 0.1) / 0.35), veg = L ? clamp01(L.g * 1.5) * suit : 0;
   const water = under ? 1 : mapR[k] > 0.5 ? 0.55 : wetFrac > 0.12 ? Math.min(0.8, 0.3 + 0.5 * wetFrac) : 0;
   const cold = clamp01((0.22 - warm) / 0.28);
   const name = under ? (cold > 0.6 ? 'Pack ice' : cold > 0 ? 'Icy sea' : 'Open sea') : air < 0.02 ? (relief > 0.5 ? 'Snowy peaks' : 'Snowfield')
-    : relief > 0.5 ? 'Mountains' : water > 0 ? (mapR[k] > 0.5 ? 'Riverbank' : 'Shore') : damp < 0.3 ? 'Desert' : relief > 0.2 ? 'Hills' : 'Plains';
+    : relief > 0.5 ? 'Mountains' : veg > 0.45 ? (damp > 0.6 ? 'Forest' : 'Grassland') : water > 0 ? (mapR[k] > 0.5 ? 'Riverbank' : 'Shore') : damp < 0.3 ? 'Desert' : relief > 0.2 ? 'Hills' : 'Plains';
+  const zone = (under ? warm : air) < 0.02 ? 'polar' : (under ? warm : air) < 0.3 ? 'subpolar' : (under ? warm : air) > 1.6 ? 'scorching' : under ? (warm > 1.05 ? 'tropical' : 'temperate')
+    : damp < 0.3 ? 'arid' : air > 1.05 ? (damp > 0.6 ? 'tropical' : 'subtropical') : 'temperate';
   for (const c of ['uDeep', 'uShallow', 'uSand', 'uLow', 'uForest', 'uHigh', 'uPeak', 'uAtm']) u[c].value.copy(g[c].value);
   u.uSeed.value = ((p.seed % 100) + lon * 3.1 + lat * 7.7 + 50) % 100; u.uRelief.value = relief; u.uWater.value = water; u.uCold.value = water ? cold : 0;
   u.uAirT.value = air; u.uDamp.value = damp; u.uRing.value = p.rings; u.uMoons.value = p.moons.length; u.uAir.value = planetKind(p) === 'ocean' ? 1 : 0.8;
-  land = { name, air, weather: damp > 0.6 ? 1 : 0, sunX: 0.42, sunY: 0.74, pan: 0, panV: 0, panAt: -10, flash: 0 };
+  u.uVeg.value = veg; u.uCivL.value = L ? L.c * suit : 0; faithColor(L ? L.f : 0, u.uCivCol.value);
+  land = { name: `${name}, ${zone}`, air, weather: damp > 0.6 ? 1 : 0, sunX: 0.42, sunY: 0.74, pan: 0, panV: 0, panAt: -10, flash: 0,
+    lon, lat, k, dampBase, under, chosen: false, since: 0, tick: 0, told: -1 }; // where on the world this is, for the weather to work on
   u.uSun.value.set(land.sunX, land.sunY); u.uCloud.value = WEATHER[land.weather][1]; u.uRain.value = u.uFog.value = u.uFlash.value = 0; u.uPan.value = 0;
   for (const hd of [hands.Left, hands.Right]) { hd.release(); hd.dwell = null; hd.rest = null; hd.charge = 0; }
   setLevel(4); warp(1);
-  note(`${name}. Pinch to move the sun; point and hold to change the weather.`, 7);
+  note(`${name}. The climate here is ${zone}. Point and hold to change the weather; storms water the land.`, 7);
 }
 
 // what each gesture does once you are standing there
@@ -1525,24 +1728,48 @@ function landAct(hand, now, dt) {
   const g = hand.gesture;
   if (!land || zoomLock) return;
   if (g === 'open') {
-    if (hand.charge >= T.minCharge) { land.flash = 1; landMat.uniforms.uBoltX.value = hand.pos.x / (viewH * LAND_M); hand.lastBurst = now; } // a gathered fist let go: lightning
+    if (hand.charge >= T.minCharge) { land.flash = 1; landMat.uniforms.uBoltX.value = hand.pos.x / (viewH * LAND_M); hand.lastBurst = now; if (focusP && focusP.life && focusP.life.s === 4) { smite(focusP, 0.08); note('They cower from your lightning', 3); } } // a gathered fist let go: lightning
     hand.charge = 0;
     const sp = Math.abs(hand.vel.x);
-    if (sp > 0.6) { land.panV += (-hand.vel.x * (sp - 0.6) / sp / (viewH * LAND_M) / 0.8 - land.panV) * 0.3; land.panAt = now; } // a sweep of the hand walks you along
+    if (sp > 0.6) { land.panV += (-hand.vel.x * (sp - 0.6) / sp / (viewH * LAND_M) / 0.8 - land.panV) * 0.3; land.panAt = now; } // a sweep of the hand turns you round on the spot
   } else if (g === 'fist') {
     hand.charge = Math.min(1, hand.charge + dt / 2.2); hand.fistAt = now;
   } else if (g === 'pinch') { // take hold of the sun: day, dusk and night are wherever you put it
     const q = hand.pinchPt, k = Math.min(1, dt * 6);
-    land.sunX += (q.x / (viewH * LAND_M) - land.sunX) * k;
+    land.sunX += wrapTurn(q.x / (viewH * LAND_M) + land.pan - land.sunX) * k; // kept as a bearing, so it stays put in the sky when you turn
     land.sunY += (THREE.MathUtils.clamp(0.5 + q.y / (viewH * LAND_M), 0.12, 0.95) - land.sunY) * k;
   } else if (g === 'point') { // a finger held up changes the weather, and goes on to the next kind while it stays
     const d = hand.dwell || (hand.dwell = { t: now, step: -1 });
     const n = Math.floor((now - d.t - T.climateHold) / T.climateStep);
     if (n >= 0 && n > d.step) {
-      d.step = n; land.weather = (land.weather + 1) % WEATHER.length;
+      d.step = n; land.weather = (land.weather + 1) % WEATHER.length; land.chosen = true; land.since = 0;
       note(land.weather === 2 && land.air < 0.08 ? 'Snowstorm' : WEATHER[land.weather][0], 2);
     }
   }
+}
+
+// The weather you call is real. A storm waters the country around where you stand, a little more for every
+// moment it rains; clear skies that you chose yourself slowly bake it dry. Cloud and mist leave it be.
+function landWeather(dt, now) {
+  const p = focusP, u = landMat.uniforms;
+  if (!p || terrainOf !== p || level !== 4) return;
+  land.since += dt;
+  if ((land.tick += dt) < 0.5) return;
+  const step = land.tick; land.tick = 0;
+  const rain = land.weather === 2 && u.uRain.value > 0.5, dry = land.weather === 0 && land.chosen && land.since > 6;
+  if (rain || dry) {
+    const to = rain ? 1 : -1, rate = step * (rain ? 0.11 : 0.05);
+    brush(land.lon, land.lat, 0.32, (k, q) => { const w = 1 - q * q; mapM[k] += (to - mapM[k]) * Math.min(1, w * rate); });
+    touched(now);
+    if (land.told !== land.weather) { land.told = land.weather; note(rain ? (land.air < 0.08 ? 'Snow is settling on the land' : 'Rain is soaking the land') : 'The land is drying out', 4); }
+  }
+  // and the view answers: the ground darkens and greens, or pales
+  const L = p.life, damp = clamp01(land.dampBase + (mapM[land.k] + globeMat.uniforms.uWet.value) * 0.7), air = land.air;
+  const suit = land.under ? 0 : clamp01((air - 0.02) / 0.2) * clamp01((1.7 - air) / 0.4) * clamp01((damp + 0.1) / 0.35), e = Math.min(1, step * 0.8);
+  u.uDamp.value += (damp - u.uDamp.value) * e;
+  u.uVeg.value += ((L ? clamp01(L.g * 1.5) * suit : 0) - u.uVeg.value) * e;
+  u.uCivL.value += ((L ? L.c * suit : 0) - u.uCivL.value) * e;
+  if (L) faithColor(L.f, u.uCivCol.value);
 }
 
 function updateLand(dt, now) {
@@ -1551,9 +1778,10 @@ function updateLand(dt, now) {
   if (now - land.panAt > 0.1) land.panV *= Math.exp(-2.5 * dt);
   land.pan += land.panV * dt;
   land.flash *= Math.exp(-5 * dt);
+  landWeather(dt, now);
   u.uCloud.value += (w[1] - u.uCloud.value) * k; u.uRain.value += (w[2] - u.uRain.value) * k; u.uFog.value += (w[3] - u.uFog.value) * k;
   u.uSnowing.value = land.air < 0.08 ? 1 : 0;
-  u.uSun.value.set(land.sunX, land.sunY); u.uPan.value = land.pan; u.uFlash.value = land.flash < 0.01 ? 0 : land.flash * (0.6 + 0.4 * Math.sin(now * 70));
+  u.uSun.value.set(wrapTurn(land.sunX - land.pan), land.sunY); u.uPan.value = land.pan; u.uFlash.value = land.flash < 0.01 ? 0 : land.flash * (0.6 + 0.4 * Math.sin(now * 70));
   u.uTime.value = bodyTime; u.uAlpha.value = E4; u.uAspect.value = viewW / viewH;
   landMesh.visible = true; landMesh.scale.set(viewW * LAND_M, viewH * LAND_M, 1);
   if (E4 >= 0.999) globe.visible = false; // nothing of the globe shows through any more
@@ -1991,13 +2219,13 @@ const whereEl = document.getElementById('where'), noteEl = document.getElementBy
 let entered = false, noteT = 0, saveT = 0;
 function enter() {
   if (entered) return;
-  keepAwake(); legendBtn.hidden = false; setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on');
+  keepAwake(); applySound(); legendBtn.hidden = false; setPalette(0); introEl.classList.add('hidden'); hudEl.classList.add('on'); paletteEl.classList.add('on');
   loadUniverse(); entered = true; whereEl.classList.add('on'); refreshChrome();
 }
 
 // a short message in the middle of the screen: what you are growing, where you have arrived, why nothing happened
 function note(msg, secs = 3.5) {
-  if (noteEl.textContent !== msg) noteEl.textContent = msg;
+  if (noteEl.textContent !== msg) { noteEl.textContent = msg; chime(); }
   noteEl.classList.add('on'); noteT = secs;
 }
 
@@ -2020,9 +2248,9 @@ const LEGEND = { // one line per level: universe, galaxy, solar system, a world 
     '<b>Both hands open</b>sweep apart over a planet to land; touch and rest them together to leave',
     '<b>Open hand</b>holds or turns the planet for the other hand; touch and rest both together to leave',
     '<b>Open hand</b>holds or turns the planet; touch and rest both together to leave',
-    '<b>Open hand</b>sweep sideways to walk along; touch and rest both together to leave'],
+    '<b>Open hand</b>sweep sideways to turn and look around; touch and rest both together to leave'],
   point: ['<b>Point</b>draw with light', '<b>Point</b>draw with light', '<b>Point</b>draw with light',
-    '<b>Point</b>rest on a spot to change its climate', '<b>Point</b>draw with light', '<b>Point</b>hold to change the weather'],
+    '<b>Point</b>rest on a spot to freeze it, or to thaw it if it is frozen', '<b>Point</b>draw with light', '<b>Point</b>hold to change the weather: storms water the land, clear skies dry it'],
   peace: ['<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors', '<b>Peace sign</b>change colors',
     '<b>Two fingers</b>rest on a spot for a second to go down and stand there', '<b>Peace sign</b>change colors', '<b>Two fingers</b>nothing down here yet'],
   nebula: ['<b>Two fingertips</b>touch, then pull apart for a nebula',
@@ -2037,7 +2265,7 @@ const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to li
 function refreshChrome() {
   const row = level < 3 ? level : level === 4 ? 5 : focusP && !isSolid(focusP) ? 4 : 3;
   for (const k in LEGEND) if (chips[k]) chips[k].innerHTML = LEGEND[k][row];
-  whereEl.textContent = level === 0 ? 'Universe' : level === 1 ? 'Universe › Galaxy' : `Universe › Galaxy › ${focusS ? starName(focusS) : 'Star'}${level >= 3 && focusP ? ' › ' + planetName(focusP) : ''}${level === 4 && land ? ' › ' + land.name : ''}`;
+  whereEl.textContent = whereText();
   upBtn.hidden = !entered || level === 0;
   savesBtn.hidden = !entered;
 }
@@ -2056,6 +2284,8 @@ function snapshot() {
       stars: g.stars.map(s => ({ u: r(s.u), v: r(s.v), grow: r(s.grow), seed: s.seed,
         planets: s.planets.map(p => ({ r: r(p.r), a: r(p.a), grow: r(p.grow), seed: p.seed, rings: r(p.rings),
           map: p.map || undefined, sea: p.sea == null ? undefined : r(p.sea), wind: p.wind === 1 ? undefined : r(p.wind), spots: p.spots.length ? p.spots.map(q => q.map(r)) : undefined,
+          life: p.life && (p.life.s || p.life.t > 0 || p.life.ev) ? { s: p.life.s, t: r(p.life.t), g: r(p.life.g), c: r(p.life.c), f: r(p.life.f), ev: p.life.ev ? [p.life.ev.k, Math.round(p.life.ev.left)] : undefined } : undefined,
+          scars: p.scars.length ? p.scars.map(q => q.map(r)) : undefined,
           moons: p.moons.map(m => ({ d: r(m.d), a: r(m.a), seed: m.seed })) })) })) })),
     nebulae: nebulae.map(n => ({ space: n.space, x: r(n.x), y: r(n.y), rot: r(n.rot), size: r(n.size), pal: n.pal, ci: n.ci, seed: r(n.seed) })) };
 }
@@ -2082,7 +2312,9 @@ function applySnapshot(d) {
     g.stars = (s.stars || []).map(a => {
       const st = mkStar(a.u, a.v, a.grow, a.seed);
       st.planets = (a.planets || []).map(b => { const p = mkPlanet(b.r, b.a, b.grow, b.seed); p.rings = b.rings || 0; p.moons = (b.moons || []).map(m => ({ ...m }));
-        p.map = b.map || null; p.sea = b.sea ?? null; p.wind = b.wind ?? 1; p.spots = (b.spots || []).map(q => [...q]); return p; });
+        p.map = b.map || null; p.sea = b.sea ?? null; p.wind = b.wind ?? 1; p.spots = (b.spots || []).map(q => [...q]); p.scars = (b.scars || []).map(q => [...q]);
+        if (b.life) Object.assign(lifeOf(p), { s: b.life.s | 0, t: +b.life.t || 0, g: +b.life.g || 0, c: +b.life.c || 0, f: +b.life.f || 0, ev: b.life.ev ? { k: b.life.ev[0] % DISASTERS.length, left: b.life.ev[1] } : null });
+        return p; });
       return st;
     });
     shapeGalaxy(g);
@@ -2139,6 +2371,7 @@ function renderSaves() {
   saveName.placeholder = `Universe ${slots.length + 1}`;
 }
 function showSaves(on) {
+  if (on) document.getElementById('settings').hidden = true;
   if (!entered) return;
   savesEl.hidden = !on; savesBtn.classList.toggle('lit', on);
   if (on) { saveName.value = ''; renderSaves(); } else saveName.blur();
@@ -2171,7 +2404,7 @@ newUniBtn.addEventListener('pointerdown', holdStart);
 for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) newUniBtn.addEventListener(ev, holdEnd);
 newUniBtn.addEventListener('contextmenu', e => e.preventDefault()); // a long press on a touch screen
 // typing a name must not set off the single-key shortcuts
-window.addEventListener('keydown', e => { if (e.target instanceof HTMLInputElement) { if (e.key === 'Escape') showSaves(false); e.stopImmediatePropagation(); } }, true);
+window.addEventListener('keydown', e => { if (e.target instanceof HTMLInputElement) { if (e.key === 'Escape') { showSaves(false); document.getElementById('settings').hidden = true; } e.stopImmediatePropagation(); } }, true);
 window.addEventListener('keydown', e => {
   if (!entered || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'u' || e.key === 'U') showSaves(savesEl.hidden);
@@ -2243,6 +2476,94 @@ if (requestFs && exitFs && (document.fullscreenEnabled ?? document.webkitFullscr
   document.addEventListener('webkitfullscreenchange', onFsChange);
 } else fsBtn.hidden = true;
 
+// ---------------------------------------------------------------- sound
+// Off until asked for. A low hum under everything, and a soft note whenever a message appears.
+let audio = null;
+function applySound() {
+  if (settings.sound && !audio) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC(), master = ctx.createGain(), hum = ctx.createGain(), low = ctx.createBiquadFilter();
+    low.type = 'lowpass'; low.frequency.value = 420; master.connect(ctx.destination); hum.connect(master); low.connect(hum);
+    for (const [f, g] of [[55, 0.5], [82.6, 0.3], [110.4, 0.22], [164.2, 0.1]]) {
+      const o = ctx.createOscillator(), og = ctx.createGain(), lfo = ctx.createOscillator(), lg = ctx.createGain();
+      o.frequency.value = f; og.gain.value = g; lfo.frequency.value = 0.03 + Math.random() * 0.06; lg.gain.value = g * 0.5;
+      lfo.connect(lg); lg.connect(og.gain); o.connect(og); og.connect(low); o.start(); lfo.start();
+    }
+    audio = { ctx, master, hum };
+  }
+  if (!audio) return;
+  if (settings.sound) audio.ctx.resume?.(); else audio.ctx.suspend?.();
+  audio.master.gain.value = settings.volume; audio.hum.gain.value = settings.hum ? 0.35 : 0;
+}
+function chime() {
+  if (!audio || !settings.sound || !settings.chimes) return;
+  const { ctx, master } = audio, t = ctx.currentTime;
+  for (const [f, d] of [[659.3, 0], [987.8, 0.09]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = f; g.gain.setValueAtTime(0, t + d); g.gain.linearRampToValueAtTime(0.09, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0005, t + d + 0.9);
+    o.connect(g); g.connect(master); o.start(t + d); o.stop(t + d + 1);
+  }
+}
+
+// ---------------------------------------------------------------- the settings window
+const setEl = document.getElementById('settings'), setBtn = document.getElementById('setBtn');
+const VIEWS = [['Universe view', [0]], ['Galaxy view', [1]], ['Solar system view', [2]], ['Planet view', [3, 4]], ['Surface view', [5]]];
+function renderControls(v) {
+  const [, rows] = VIEWS[v], box = document.getElementById('ctlList');
+  box.innerHTML = rows.map(r => (rows.length > 1 ? `<h3>${r === 3 ? 'A world with ground' : 'A gas or ice giant'}</h3>` : '') + '<ul>'
+    + Object.values(LEGEND).map(l => l[r]).filter(t => !/nothing down here/.test(t)).map(t => `<li>${t}</li>`).join('') + '</ul>').join('');
+  document.querySelectorAll('#ctlTabs button').forEach((b, i) => b.classList.toggle('sel', i === v));
+}
+document.getElementById('ctlTabs').innerHTML = VIEWS.map(([n], i) => `<button type="button" data-v="${i}">${n}</button>`).join('');
+document.getElementById('ctlTabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) renderControls(+b.dataset.v); });
+function showTab(name) {
+  document.querySelectorAll('#setTabs button').forEach(b => b.classList.toggle('sel', b.dataset.tab === name));
+  document.querySelectorAll('#settings section').forEach(x => { x.hidden = x.dataset.tab !== name; });
+  if (name === 'controls') renderControls(level < 3 ? level : level === 4 ? 4 : 3); // open on the view you are in
+  if (name === 'main') document.getElementById('setWhere').textContent = entered ? whereText() : 'Not started yet';
+}
+document.getElementById('setTabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
+function applySettings(save = true) {
+  T.lifeSpeed = settings.pace;
+  const want = settings.res === 'auto' ? null : Math.min(2, +settings.res || 1);
+  if (want && Math.abs(want - pixelRatio) > 0.01) { landCost = 0; setRatio(want); }
+  applySound();
+  for (const el of document.querySelectorAll('#settings [data-k]')) {
+    const v = settings[el.dataset.k];
+    if (el.type === 'checkbox') el.checked = v; else el.value = String(v);
+  }
+  document.getElementById('setCam').checked = video.classList.contains('on'); document.getElementById('setCam').disabled = mode !== 'camera';
+  document.getElementById('setGuide').checked = !hudEl.classList.contains('min');
+  if (save) try { localStorage.setItem(SET_KEY, JSON.stringify(settings)); } catch {}
+}
+setEl.addEventListener('input', e => {
+  const el = e.target, k = el.dataset.k;
+  if (el.id === 'setCam') { if (el.checked !== video.classList.contains('on')) toggleCam(); return; }
+  if (el.id === 'setGuide') { setLegend(el.checked); return; }
+  if (!k) return;
+  const was = settings.res;
+  settings[k] = el.type === 'checkbox' ? el.checked : typeof SET_DEFAULT[k] === 'number' ? +el.value : el.value;
+  if (k === 'res' && settings.res === 'auto' && was !== 'auto') { landCost = 0; setRatio(autoRatio()); }
+  applySettings();
+});
+function showSettings(on, tab = 'main') {
+  setEl.hidden = !on;
+  if (on) { showSaves(false); applySettings(false); showTab(tab); }
+}
+setBtn.addEventListener('click', e => { showSettings(setEl.hidden); e.currentTarget.blur(); });
+setEl.addEventListener('pointerdown', e => { if (e.target === setEl) showSettings(false); });
+document.getElementById('setClose').addEventListener('click', () => showSettings(false));
+document.getElementById('setUniverses').addEventListener('click', () => { showSettings(false); if (entered) showSaves(true); });
+document.getElementById('setUp').addEventListener('click', () => { if (entered) surface(); showTab('main'); });
+document.getElementById('setFs').addEventListener('click', () => toggleFullscreen());
+document.getElementById('setReset').addEventListener('click', () => { const was = settings.res; Object.assign(settings, SET_DEFAULT); if (was !== 'auto') { landCost = 0; setRatio(autoRatio()); } applySettings(); });
+window.addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 's' || e.key === 'S') showSettings(setEl.hidden); else if (e.key === 'Escape') showSettings(false);
+});
+T.lifeSpeed = settings.pace;
+
 // Nobody touches the screen while playing, so stop the device dimming or locking, and pick the
 // camera back up when the tab or app comes back to the front.
 let wakeLock = null;
@@ -2266,7 +2587,7 @@ function frame() {
   const now = performance.now() / 1000, rawDt = now - last, dt = Math.min(0.05, rawDt);
   last = now;
   // on a device that cannot keep up, trade resolution for smoothness
-  if (mode === 'camera' && rawDt < 0.25) {
+  if (mode === 'camera' && rawDt < 0.25 && settings.res === 'auto') {
     perfT += rawDt; perfN++;
     if (perfT >= 2) {
       if (perfN / perfT < 38 && pixelRatio > 0.75) {
@@ -2313,8 +2634,9 @@ function frame() {
   updateGalaxies(dt);
   updateBodies(dt, now);
   updateLand(dt, now);
-  if (onLand !== (E4 > 0.5)) { onLand = !onLand; if (landCost) setRatio(onLand ? Math.max(0.75, pixelRatio - landCost) : pixelRatio + landCost); }
-  bloom.strength = 0.85 - 0.6 * E3 - 0.07 * E4; // close to a planet the glow would wash its surface out
+  updateLife(dt);
+  if (onLand !== (E4 > 0.5)) { onLand = !onLand; if (landCost && settings.res === 'auto') setRatio(onLand ? Math.max(0.75, pixelRatio - landCost) : pixelRatio + landCost); }
+  bloom.strength = (0.85 - 0.6 * E3 - 0.07 * E4) * settings.glow; // close to a planet the glow would wash its surface out
   updateParticles(dt);
   updateAmbient(dt);
 
@@ -2325,8 +2647,8 @@ function frame() {
   }
 
   // name the star or planet being grown, as it passes from one kind to the next
-  const maker = [L, R].find(h => h.active && h.grab && h.grab.growing && h.grab.kind !== 'galaxy');
-  if (maker) note(maker.grab.kind === 'star' ? starName(maker.grab) : planetName(maker.grab), 0.5);
+  const maker = [L, R].find(h => h.active && h.grab && h.grab.growing);
+  if (maker) note(titleOf(maker.grab), 0.5);
   else if (noteT > 0 && (noteT -= dt) <= 0) noteEl.classList.remove('on');
   if (saveT > 0 && (saveT -= dt) <= 0) saveUniverse();
 
@@ -2345,7 +2667,7 @@ frame();
 // A handle for poking at things from the console. pose() stands in for the camera: call it every frame
 // with a hand's position and gesture and the rest of the game cannot tell the difference.
 window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, enter, surface, saveUniverse,
-  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, get globeR() { return globeR; }, globePoint, mapH,
+  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, properName, titleOf, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, T, lifeOf, measureLife, get terrainOf() { return terrainOf; }, get globeR() { return globeR; }, globePoint, mapH,
   get at() { return at; },
   pose(key, x, y, gesture, tipX = x, tipY = y) {
     const h = hands[key], fresh = !h.active;

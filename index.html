@@ -144,6 +144,30 @@
   #camBtn.off .slash { display: block; }
   #camBtn.off, #legendBtn.off { opacity: .7; }
 
+  /* settings: tabs across the top, one page at a time */
+  #settings { position: fixed; inset: 0; z-index: 7; display: grid; place-items: center; padding: 20px; background: rgba(2,3,10,.6); }
+  #settings[hidden] { display: none; }
+  #settings .panel { width: min(620px, 100%); }
+  #settings section[hidden] { display: none; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+  .tabs.sub { border: 0; padding: 0; margin-bottom: 12px; }
+  .tabs button { border-color: var(--line); background: transparent; color: var(--dim); }
+  .tabs button.sel { border-color: var(--blue); background: rgba(74,168,255,.22); color: #fff; }
+  .tabs.sub button { padding: 7px 12px; font-size: 10.5px; }
+  #settings h3 { margin: 14px 0 6px; font-weight: 500; font-size: 11px; letter-spacing: .24em; text-transform: uppercase; color: var(--dim); }
+  #ctlList ul, .keys { list-style: none; margin: 0; padding: 0; }
+  #ctlList li, .keys li { padding: 9px 0; border-top: 1px solid var(--line); font-size: 13.5px; line-height: 1.45; color: #b9c0de; padding-left: 140px; }
+  #ctlList li b:first-child, .keys b { display: inline-block; width: 140px; margin-left: -140px; color: var(--ink); font-weight: 600; }
+  #ctlList li b.in { color: var(--ink); }
+  .opt { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 0; border-top: 1px solid var(--line); font-size: 13.5px; }
+  .opt small { display: block; margin-top: 3px; font-size: 11.5px; color: var(--dim); }
+  .opt select { font: inherit; font-size: 13px; color: var(--ink); background: #0b1024; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; }
+  .opt input[type=range] { width: 150px; accent-color: var(--blue); }
+  .opt input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--blue); flex: none; }
+  #setWhere { margin: 0 0 14px; font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--orange); line-height: 1.6; }
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  @media (max-width: 520px) { #ctlList li b:first-child, .keys b { display: block; width: auto; margin: 0 0 2px; } #ctlList li, .keys li { padding-left: 0; } }
+
   /* phones, and anything short: controls move to the top so the legend has the bottom to itself */
   @media (max-width: 760px), (max-height: 520px) {
     #controls { bottom: auto; top: calc(12px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); }
@@ -188,6 +212,9 @@
   <button id="camBtn" class="ctl" type="button" aria-label="Toggle camera preview" title="Hide camera preview (V)" hidden>
     <svg viewBox="0 0 24 24"><path d="M3 7h11v10H3zM14 10.5l6-3.5v10l-6-3.5"/><path class="slash" d="M3 3l18 18"/></svg>
   </button>
+  <button id="setBtn" class="ctl" type="button" aria-label="Settings and controls" title="Settings and controls (S)">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>
+  </button>
   <button id="fs" class="ctl" type="button" aria-label="Toggle full screen" title="Full screen (F)">
     <svg class="enter" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     <svg class="exit" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>
@@ -202,6 +229,47 @@
     <p id="saveEmpty" class="fine">No saved universes yet.</p>
     <div class="row"><button id="newUni" type="button"><span>Hold for a new universe</span></button><button id="savesClose" type="button" class="quiet">Close</button></div>
     <p class="fine">Saves are kept in this browser. The universe you are in is also remembered automatically.</p>
+  </div>
+</div>
+
+<div id="settings" hidden>
+  <div class="panel" role="dialog" aria-label="Settings">
+    <div id="setTabs" class="tabs">
+      <button type="button" data-tab="main">Main</button><button type="button" data-tab="controls">Controls</button><button type="button" data-tab="graphics">Graphics</button><button type="button" data-tab="sound">Sound</button><button type="button" data-tab="game">Settings</button>
+    </div>
+    <section data-tab="main">
+      <p id="setWhere"></p>
+      <div class="acts"><button id="setUniverses" type="button">Universes: save, load, new</button><button id="setUp" type="button">Zoom back out</button><button id="setFs" type="button">Full screen</button></div>
+      <h3>Keyboard</h3>
+      <ul class="keys">
+        <li><b>S</b>this window</li><li><b>U</b>universes: save, load or start a new one</li><li><b>B or Backspace</b>zoom back out</li>
+        <li><b>H</b>show or hide the gesture guide</li><li><b>V</b>show or hide the camera view</li><li><b>F</b>full screen</li><li><b>Hold N</b>a new universe</li>
+      </ul>
+    </section>
+    <section data-tab="controls" hidden>
+      <div id="ctlTabs" class="tabs sub"></div>
+      <div id="ctlList"></div>
+    </section>
+    <section data-tab="graphics" hidden>
+      <label class="opt"><span>Sharpness<small>Auto lowers it by itself when the device struggles</small></span>
+        <select data-k="res"><option value="auto">Auto</option><option value="0.75">Low</option><option value="1">Medium</option><option value="1.5">High</option><option value="2">Very high</option></select></label>
+      <label class="opt"><span>Glow<small>How much bright things bloom</small></span><input data-k="glow" type="range" min="0" max="1.6" step="0.05"></label>
+      <label class="opt"><span>Camera view<small>The small picture of you in the corner</small></span><input id="setCam" type="checkbox"></label>
+      <label class="opt"><span>Gesture guide<small>The row of hints along the bottom</small></span><input id="setGuide" type="checkbox"></label>
+    </section>
+    <section data-tab="sound" hidden>
+      <label class="opt"><span>Sound</span><input data-k="sound" type="checkbox"></label>
+      <label class="opt"><span>Volume</span><input data-k="volume" type="range" min="0" max="1" step="0.05"></label>
+      <label class="opt"><span>Ambient hum<small>A low drone under everything</small></span><input data-k="hum" type="checkbox"></label>
+      <label class="opt"><span>Message chimes<small>A soft note when news arrives</small></span><input data-k="chimes" type="checkbox"></label>
+    </section>
+    <section data-tab="game" hidden>
+      <label class="opt"><span>Pace of life<small>How fast life grows, changes and forgets</small></span>
+        <select data-k="pace"><option value="0.5">Slow</option><option value="1">Normal</option><option value="2">Fast</option><option value="4">Very fast</option></select></label>
+      <label class="opt"><span>Random disasters<small>Meteors, ice ages, heat waves and droughts nobody asked for</small></span><input data-k="disasters" type="checkbox"></label>
+      <div class="opt"><span>Put every setting back<small>Your universes are not touched</small></span><button id="setReset" type="button" class="quiet">Reset</button></div>
+    </section>
+    <div class="row"><span></span><button id="setClose" type="button" class="quiet">Close</button></div>
   </div>
 </div>
 
@@ -243,6 +311,6 @@
   <div id="hint"></div>
 </div>
 
-<script type="module" src="./main.js?v=38"></script>
+<script type="module" src="./main.js?v=48"></script>
 </body>
 </html>
