@@ -601,7 +601,7 @@ function unplace(x, y, out) {
 
 function setLevel(n) {
   level = n; zoomLock = true; zoomKey = null; zoomOn = false; zoomHeld = 0; refreshChrome();
-  note(n === 3 && focusP && !isSolid(focusP) ? 'Pinch the clouds to brew a storm' : n === 3 && focusP && focusP.life && focusP.life.s === 4 ? `A civilization lives on ${properName(focusP.seed)}. ${mood(focusP.life.f)}.` : ARRIVE[n], 6);
+  note(n === 3 && focusP && !isSolid(focusP) ? 'Pinch the clouds to brew a storm' : n === 3 && focusP && focusP.life && focusP.life.s === 4 ? `The ${folk(focusP).name} live on ${properName(focusP.seed)}: ${folk(focusP).traitText}. ${mood(focusP.life.f)}.` : ARRIVE[n], 6);
 }
 
 function diveInto(o) {
@@ -685,7 +685,7 @@ function updateZoom(L, R, now, dt) {
     if (handsTouch(L, R, d)) {
       if (!zoomMeet && zoomFar - d > T.zoomCame) zoomMeet = true;
       zoomMin = d; zoomKey = null;
-      zoomRested = zoomMeet && level > 0 && now >= zoomWait ? zoomRested + dt : 0;
+      zoomRested = zoomMeet && level > 0 && level < 4 && now >= zoomWait ? zoomRested + dt : 0;
     } else { zoomMeet = false; zoomRested = 0; }
     const outward = clamp01(zoomRested / T.zoomRest);
     if (outward > 0) {
@@ -1384,7 +1384,7 @@ function moonPinch(hand, now) {
   if (p.moons.length >= MOON_MAX) { note('This planet has all the moons it can hold. A supernova will clear one away.'); hand.makeAt = now; return; }
   const m = { d: 0, a: 0, seed: newSeed() };
   setMoon(m, q); m.heldAt = now; m.wx = q.x; m.wy = q.y; m.wr = globeR * 0.1;
-  p.moons.push(m); hand.moon = m; markDirty();
+  p.moons.push(m); hand.moon = m; markDirty(); if (isSolid(p)) chron(p, `A new moon, ${properName(m.seed)}, appears in the sky`);
   note(`${properName(m.seed)}, a moon of ${properName(p.seed)}`, 4);
 }
 function planetPinch(hand, now, dt) {
@@ -1474,7 +1474,8 @@ function skyImpact(p, pt) {
     p.moons.splice(p.moons.indexOf(best), 1);
     for (let i = 0; i < 180; i++) { const a = Math.random() * TAU, v = 0.5 + Math.random() * 3.5, c = 0.25 + Math.random() * 0.3; spawn(best.wx, best.wy, 0, Math.cos(a) * v, Math.sin(a) * v, rnd(0.3), c, c * 0.92, c * 0.82, 0.8 + Math.random() * 1.6, 0.04 + Math.random() * 0.05); }
     note(`${properName(best.seed)}, a moon of ${properName(p.seed)}, destroyed`, 5);
-    smite(p, 0.12); markDirty();
+    if (isSolid(p)) chron(p, `The moon ${properName(best.seed)} is destroyed${best.col ? ', and its colony with it' : ''}`);
+    smite(p, best.col ? 0.3 : 0.12); markDirty();
     return;
   }
   if (!p.rings) return;
@@ -1485,14 +1486,14 @@ function skyImpact(p, pt) {
     const a = Math.random() * TAU, R = globeR * (1.24 + Math.random() * (outer - 1.24)), ex = Math.cos(a) * R, ey = Math.sin(a) * R * 0.3, v = 0.6 + Math.random() * 2.4, g = 0.3 + Math.random() * 0.3;
     spawn(c * ex - sn * ey, sn * ex + c * ey, 0, Math.cos(a) * v, Math.sin(a) * v * 0.5 + rnd(0.6), 0, g, g * 0.95, g * 0.85, 0.8 + Math.random() * 1.4, 0.035 + Math.random() * 0.04);
   }
-  p.rings = 0; markDirty();
+  p.rings = 0; markDirty(); if (isSolid(p)) chron(p, 'The rings are scattered');
   note(`The rings of ${properName(p.seed)} are scattered`, 5);
 }
 function planetImpact(pt, power, now) {
   const p = focusP;
   if (!p || level !== 3 || E3 < 0.9 || zoomLock) return;
   if (!globePoint(pt.x, pt.y)) return skyImpact(p, pt);
-  if (isSolid(p)) { stampCrater(mapH, at.lon, at.lat, 0.07 + 0.2 * power, 0.14 + 0.3 * power); smite(p, 0.15 + 0.3 * power); }
+  if (isSolid(p)) { stampCrater(mapH, at.lon, at.lat, 0.07 + 0.2 * power, 0.14 + 0.3 * power); chron(p, 'A meteor is thrown down by your hand'); if (p.life && p.life.s === 4) p.life.ruin = Math.min(1, p.life.ruin + 0.15 + 0.3 * power); smite(p, 0.15 + 0.3 * power); }
   else { p.spots.push([at.lon, at.lat, 0.05 + 0.12 * power, 1]); if (p.spots.length > SPOT_MAX) p.spots.shift(); }
   touched(now);
 }
@@ -1505,7 +1506,7 @@ function planetTips(mx, my, d, now) {
     else if (d < T.nebulaTouch) sculpt = { tide: true, ring: true, d };
     else return;
   }
-  if (sculpt.ring) { p.rings = Math.max(0.12, clamp01((d - 0.6) / 5)); markDirty(); return; }
+  if (sculpt.ring) { if (!p.rings && isSolid(p)) chron(p, 'Rings are drawn round the world'); p.rings = Math.max(0.12, clamp01((d - 0.6) / 5)); markDirty(); return; }
   planetTide(d, now);
 }
 function planetTide(d, now) {
@@ -1551,7 +1552,8 @@ const STAGE_SECS = [50, 80, 110, 150]; // seconds each step takes on a perfectly
 const STAGE_SHORT = ['', 'Microbes', 'Plants', 'Animals', 'Civilization'];
 const STAGE_NEWS = ['', 'Life has begun in the seas', 'Plants are spreading over the land', 'Animals now roam', 'A civilization has arisen'];
 const DISASTERS = [['An ice age', -0.55, 0], ['A heat wave', 0.65, -0.3], ['A drought', 0.1, -0.7]]; // name, warmer or colder, wetter or drier
-const lifeOf = p => p.life || (p.life = { s: 0, t: 0, g: 0, c: 0, f: 0, hs: 0, hl: 0, ev: null, stale: true, acted: 0 });
+const lifeOf = p => p.life || (p.life = { s: 0, t: 0, g: 0, c: 0, f: 0, hs: 0, hl: 0, ev: null, stale: true, acted: 0,
+  y: 0, hist: [], tier: 0, ruin: 0, temple: 0, mon: 0, sp: 0, out: 0, o: 0, gen: 0, fb: 0, dt: 0, wt: 0, help: 0, harm: 0 }); // its years and its chronicle; then what its people have built, how far they have gone, and what they remember of you
 const mood = f => (f > 0.6 ? 'They worship you' : f > 0.2 ? 'They love you' : f < -0.6 ? 'They live in terror of you' : f < -0.2 ? 'They fear you' : 'They are unsure of you');
 function faithColor(f, out) { return f >= 0 ? out.setRGB(1, 0.86 - 0.12 * f, 0.62 - 0.34 * f) : out.setRGB(1, 0.86 + 0.78 * f, 0.62 + 0.6 * f); } // lamplight: gold where you are loved, red where you are feared
 
@@ -1593,10 +1595,14 @@ function measureLife(p) {
 const placeOf = (p, s) => (p === focusP && level >= 3 ? 'here' : `on ${properName(p.seed)}${s === focusS && level >= 2 ? '' : ', a world of ' + properName(s.seed)}`);
 const lifeLabel = p => { const L = p.life; return !L || !isSolid(p) ? '' : (L.s === 4 ? ' · ' + mood(L.f) : L.s ? ' · ' + STAGE_SHORT[L.s] : '') + (L.ev ? ' · ' + DISASTERS[L.ev.k][0].replace(/^An? /, '') : ''); };
 // they noticed that, and did not like it
-function smite(p, amt) {
+function smite(p, amt, why) {
   const L = p && p.life;
   if (!L || L.s < 4) return;
-  L.f = Math.max(-1, L.f - amt); L.c *= 1 - amt * 0.3; markDirty();
+  const F = folk(p);
+  if (amt >= 0.05) L.harm++;
+  amt *= F.has('devout') ? 1.3 : F.has('skeptical') ? 0.7 : 1; // the devout take it to heart; sceptics call it weather
+  L.f = Math.max(-1, L.f - amt); L.c *= 1 - amt * (F.has('hardy') ? 0.15 : 0.3); markDirty();
+  if (why) chron(p, why);
 }
 
 let lifeT = 0, nextDisaster = 100 + Math.random() * 80;
@@ -1606,32 +1612,44 @@ function updateLife(dt) {
   let budget = 1; // unfolding a world we are not on is not free: one a tick is plenty
   const living = [];
   for (const g of galaxies) if (g.alive) for (const s of g.stars) for (const p of s.planets) {
+    s.gal = g;
     if (!isSolid(p) || p.growing || p.isNew) continue;
     p.sun = s;
-    const L = lifeOf(p), here = terrainOf === p, heat = orbitHeat(p);
+    const L = lifeOf(p), here = terrainOf === p, heat = orbitHeat(p), F = L.s === 4 ? folk(p) : null;
+    if (!L.hist.length) L.hist.push([0, L.s ? 'The oldest records begin here' : `${properName(p.seed)} takes shape`]);
+    if (F && !L.o) L.o = F.o; // a people from before records were kept
+    L.y += step * YEAR; L.ruin = Math.max(0, L.ruin - step / 700); // the years pass, and the grass grows over what fell
     if (L.oh == null) L.oh = heat;
     const moved = !p.held && Math.abs(heat - L.oh) > 0.03 ? heat - L.oh : 0;
-    if (moved) { L.oh = heat; note(`${properName(p.seed)} grows ${moved > 0 ? 'warmer' : 'colder'}`, 4); }
-    if (L.ev && (L.ev.left -= step) <= 0) { const was = DISASTERS[L.ev.k][0]; L.ev = null; L.stale = true; if (L.s) note(`${was} is over ${placeOf(p, s)}`, 5); }
+    if (moved) { L.oh = heat; note(`${properName(p.seed)} grows ${moved > 0 ? 'warmer' : 'colder'}`, 4); chron(p, `Its orbit shifts, and the world grows ${moved > 0 ? 'warmer' : 'colder'}`); }
+    if (L.ev && (L.ev.left -= step) <= 0) { const was = DISASTERS[L.ev.k][0]; L.ev = null; L.stale = true; chron(p, `${was} ends`); if (L.s) note(`${was} is over ${placeOf(p, s)}`, 5); }
     if ((L.acted && here) || moved) { // your hand has been at work here: is the world better for it, or worse?
       const before = L.hl;
       measureLife(p); L.acted = 0;
-      if (L.s === 4) L.f = THREE.MathUtils.clamp(L.f + (L.hl - before) * (moved ? 5 : 10), -1, 1);
+      if (F) { // the devout make much of it either way; sceptics shrug
+        const d = (L.hl - before) * (moved ? 5 : 10) * (F.has('devout') ? 1.4 : F.has('skeptical') ? 0.6 : 1);
+        L.f = THREE.MathUtils.clamp(L.f + d, -1, 1);
+        if (d > 0.03) L.help++; else if (d < -0.03) L.harm++;
+      }
     } else if (L.stale) { if (!here && budget-- <= 0) continue; measureLife(p); }
     const h = L.s <= 1 ? L.hs : L.hl, up = L.s === 0 ? L.hs : L.hl; // the seas keep microbes going; anything more needs land
-    if (h < 0.06) L.t -= step / 25;
+    if (h < 0.06) L.t -= step / (F && F.has('hardy') ? 45 : 25);
     else if (L.s < 4 && up >= 0.06) L.t += step * clamp01(up * 2.2) / STAGE_SECS[L.s];
     else if (L.t < 0) L.t = Math.min(0, L.t + step / 25);
-    if (L.t >= 1) { L.s++; L.t = 0; note(`${STAGE_NEWS[L.s]} ${placeOf(p, s)}`, 7); markDirty(); }
+    if (L.t >= 1) {
+      L.s++; L.t = 0; say(p, s, STAGE_NEWS[L.s]);
+      if (L.s === 4) { L.o = (p.seed + L.gen * 7919) | 0 || 1; L.tier = 0; L.sp = 0; p._folk = null; const N = folk(p); chron(p, `They call themselves the ${N.name}, and are ${N.traitText}`); }
+    }
     else if (L.t < 0) {
       if (L.s > 0 && L.t > -1) { /* hard times, but they hang on a while yet */ }
-      else if (L.s > 0) { L.s--; L.t = 0.5; note(L.s ? `Life is dying back ${placeOf(p, s)}` : `Life has died out ${placeOf(p, s)}`, 7); markDirty(); }
+      else if (L.s > 0) { if (L.s === 4) fallOf(p, L); L.s--; L.t = 0.5; say(p, s, L.s ? 'Life is dying back' : 'Life has died out'); }
       else L.t = 0;
     }
     const gTo = L.s >= 2 ? clamp01(L.hl * 1.6) : 0, cTo = L.s === 4 ? clamp01(L.hl * 1.5) * (0.65 + 0.35 * L.f) : 0;
     L.g += THREE.MathUtils.clamp(gTo - L.g, -step / 40, step / 90);
-    L.c += THREE.MathUtils.clamp(cTo - L.c, -step / 30, step / 120);
-    if (L.s === 4) L.f *= 1 - step / 1200; else L.f = 0; // the generations slowly forget
+    L.c += THREE.MathUtils.clamp(cTo - L.c, -step / 30, step / (F && F.has('industrious') ? 75 : 120));
+    if (L.s === 4 && F) { L.f *= 1 - step / (F.has('devout') ? 2400 : F.has('skeptical') ? 700 : 1200); updateFolk(p, s, L, F, step); } // the generations slowly forget
+    else if (L.s < 4) L.f = 0;
     if (L.s) living.push([p, s]);
   }
   if ((nextDisaster -= step) <= 0 && living.length && settings.disasters) {
@@ -1640,21 +1658,157 @@ function updateLife(dt) {
     if (Math.random() < 0.35) { // a meteor nobody threw
       const c = [(Math.random() - 0.5) * TAU, Math.asin(Math.random() * 2 - 1), 0.09 + Math.random() * 0.1, 0.25 + Math.random() * 0.2];
       if (terrainOf === p) { stampCrater(mapH, c[0], c[1], c[2], c[3]); terrainDirty = true; } else p.scars.push(c);
-      L.t -= 0.3; L.g *= 0.8; L.c *= 0.6; L.stale = true;
-      note(`A meteor has fallen ${placeOf(p, s)}`, 7);
+      L.t -= 0.3; L.g *= 0.8; L.c *= 0.6; L.stale = true; if (L.s === 4) L.ruin = Math.min(1, L.ruin + 0.25);
+      say(p, s, 'A meteor has fallen');
     } else if (!L.ev) {
       L.ev = { k: (Math.random() * DISASTERS.length) | 0, left: 150 }; L.stale = true;
-      note(`${DISASTERS[L.ev.k][0]} has begun ${placeOf(p, s)}`, 7);
+      say(p, s, `${DISASTERS[L.ev.k][0]} has begun`);
     }
     markDirty();
   }
   const t = whereText();
   if (whereEl.textContent !== t) whereEl.textContent = t;
+  if (!chronEl.hidden) renderChron(histDirty);
 }
 function whereText() {
   const gal = focusG ? titleOf(focusG) : 'Galaxy';
   return level === 0 ? 'Universe' : level === 1 ? `Universe › ${gal}`
     : `Universe › ${gal} › ${focusS ? titleOf(focusS) : 'Star'}${level >= 3 && focusP ? ' › ' + titleOf(focusP) + lifeLabel(focusP) : ''}${level === 4 && land ? ' › ' + land.name : ''}`;
+}
+
+// ---------------------------------------------------------------- the people, their record, and where they go
+// Every world keeps a chronicle of what has happened to it. Once people arise they have a name and a character
+// of their own, build camps into cities, raise temples or tear them down, and in time leave for other worlds.
+const YEAR = 4; // years of a world's history to one second of ours, at the normal pace
+const TRAITS = { devout: 'devout', skeptical: 'sceptical', curious: 'curious', warlike: 'warlike', industrious: 'industrious', hardy: 'hardy' };
+const TRAIT_KEYS = Object.keys(TRAITS), TIERS = ['camps', 'villages', 'towns', 'cities'];
+const tierOf = c => (c < 0.1 ? 0 : c < 0.32 ? 1 : c < 0.62 ? 2 : 3);
+let histDirty = false;
+// Who lives here: a name and two traits, read off the seed of the world their kind first arose on.
+function folk(p) {
+  const o = (p.life && p.life.o) || p.seed;
+  if (p._folk && p._folk.o === o) return p._folk;
+  const r = seeded((o ^ 0x2f6e2b1) | 0), base = properName((o ^ 0x5bd1e995) >>> 0), a = TRAIT_KEYS[(r() * 6) | 0];
+  let b = a;
+  while (b === a || (a === 'devout' && b === 'skeptical') || (a === 'skeptical' && b === 'devout')) b = TRAIT_KEYS[(r() * 6) | 0];
+  const traits = [a, b];
+  return (p._folk = { o, name: base + (/[aeiou]$/.test(base) ? 'ns' : 'i'), city: properName((o ^ 0x1b873593) >>> 0), traits, has: t => traits.includes(t), traitText: `${TRAITS[a]} and ${TRAITS[b]}` });
+}
+// write a line in a world's chronicle
+function chron(p, text) {
+  const L = lifeOf(p), h = L.hist, y = Math.round(L.y), last = h[h.length - 1];
+  if (last && last[1] === text && y - last[0] < 60) return;
+  h.push([y, text]);
+  if (h.length > 60) h.splice(1, h.length - 60); // its beginning is kept; the oldest years after that are let go
+  histDirty = true; markDirty();
+}
+// ...and tell you about it as well
+function say(p, s, text, secs = 7) { chron(p, text); note(`${text} ${placeOf(p, s)}`, secs); }
+
+function fallOf(p, L) {
+  chron(p, `The civilization of the ${folk(p).name} falls`);
+  L.ruin = Math.min(1, L.ruin + 0.3 + L.c); L.temple = L.mon = L.fb = L.sp = L.out = L.tier = L.help = L.harm = L.dt = L.o = 0; L.gen = (L.gen | 0) + 1;
+  for (const m of p.moons) m.col = 0;
+  p._folk = null;
+}
+
+// one tick in the life of a people
+function updateFolk(p, s, L, F, step) {
+  const nm = F.name, up = tierOf(L.c), dn = tierOf(L.c + 0.05), tier = up > L.tier ? up : dn < L.tier ? dn : L.tier;
+  if (tier > L.tier) say(p, s, [`The ${nm} gather in their first villages`, `The villages of the ${nm} grow into towns`, `${F.city}, the first city of the ${nm}, is raised`][tier - 1]);
+  else if (tier < L.tier) { say(p, s, [`The last villages of the ${nm} stand empty`, `The towns of the ${nm} shrink back to villages`, `The cities of the ${nm} are abandoned`][tier]); L.ruin = Math.min(1, L.ruin + 0.3); }
+  L.tier = tier;
+  // how they stand with you
+  if (!L.temple && tier >= 1 && L.f > (F.has('devout') ? 0.3 : 0.5)) { L.temple = 1; say(p, s, `The ${nm} raise a temple to you`); }
+  else if (L.temple && L.f < -0.15) { L.temple = 0; L.mon = 0; L.ruin = Math.min(1, L.ruin + 0.15); say(p, s, `The ${nm} tear down your temple`); }
+  if (!L.mon && L.temple && tier >= 2 && Math.random() < step / (F.has('industrious') ? 90 : 180)) { L.mon = 1; say(p, s, `The ${nm} build a monument to their creator: a great stone hand`); }
+  if (L.f > 0.6 && L.fb < 1) { L.fb = 1; say(p, s, `The ${nm} begin to worship you`); }
+  else if (L.f < -0.6 && L.fb > -1) { L.fb = -1; say(p, s, `The ${nm} come to live in terror of you`); }
+  else if (Math.abs(L.f) < 0.3) L.fb = 0;
+  if (!L.dt && tier >= 2 && Math.abs(L.f) < 0.08 && Math.random() < step / (F.has('skeptical') ? 150 : 600)) { L.dt = 1; say(p, s, `Thinkers among the ${nm} begin to question whether you exist`); }
+  if (L.ev && !L.ev.pr && p === focusP && level >= 3 && Math.random() < step / 20) { L.ev.pr = 1; note(`The ${nm} pray to you to end ${DISASTERS[L.ev.k][0].toLowerCase()}`, 6); }
+  // and with each other
+  L.wt = Math.max(0, (L.wt || 0) - step);
+  if (tier >= 2 && !L.wt && Math.random() < step / (F.has('warlike') ? 260 : 1500) * (L.f > 0.6 ? 0.4 : 1)) {
+    L.wt = 300; L.c *= 0.6; L.ruin = Math.min(1, L.ruin + 0.3);
+    say(p, s, `The ${TIERS[tier]} of the ${nm} go to war with one another`);
+  }
+  // outward
+  if (tier >= 3 && !L.out) {
+    const next = Math.floor(L.sp) + 1;
+    L.sp = Math.min(next, L.sp + step / 170 * (F.has('curious') ? 1.7 : 1));
+    if (L.sp >= next) reach(p, s, L, F, next);
+  }
+}
+// Each step outward is further than the last: into the sky, to a moon, to another world of the same star, to
+// another star. After that they go on looking for the next world for as long as their cities stand.
+function reach(p, s, L, F, n) {
+  if (n === 1) return say(p, s, `The ${F.name} launch their first spacecraft`);
+  if (n === 2) { const m = p.moons.find(q => !q.col); if (m) launch(p, s, m, 'moon', 14); return; }
+  const open = q => q !== p && isSolid(q) && !q.growing && !q.isNew && lifeOf(q).s < 4 && !ships.some(sh => sh.to === q);
+  let best = null;
+  if (n === 3) { for (const q of s.planets) if (open(q) && (!best || q.life.hl > best.life.hl)) best = q; }
+  else for (const s2 of s.gal.stars) if (s2 !== s) for (const q of s2.planets) { q.sun = s2; s2.gal = s.gal; if (open(q) && (!best || q.life.hl > best.life.hl)) best = q; }
+  if (best) {
+    launch(p, s, best, n === 3 ? 'planet' : 'star', n === 3 ? 26 : 55);
+    say(p, s, n === 3 ? `A ship of the ${F.name} sets out for ${properName(best.seed)}` : `A starship of the ${F.name} leaves for ${properName(best.seed)}, a world of the star ${properName(best.sun.seed)}`);
+  }
+  if (n >= 4) L.sp = 1;
+}
+
+const ships = []; // those under way just now. They are not kept between visits: one lost that way is simply sent again.
+function launch(p, s, to, kind, dur) { p.life.out = 1; ships.push({ p, s, to, kind, t: 0, dur, s2: kind === 'moon' ? s : to.sun }); }
+function arrive(sh) {
+  const { p, s, to, kind } = sh, L = p.life, nm = folk(p).name;
+  L.out = 0;
+  if (kind === 'moon') { to.col = 1; say(p, s, `The ${nm} found a colony on the moon ${properName(to.seed)}`, 8); return; }
+  const Q = lifeOf(to), there = properName(to.seed), from = properName(p.seed);
+  if (Q.s === 4) return; // someone else got there first
+  if (Q.stale) measureLife(to);
+  if (Q.hl < 0.06) { chron(to, `A ship of the ${nm} lands, finds the world too harsh, and leaves`); say(p, s, `The expedition to ${there} finds it too harsh to settle`); return; }
+  Object.assign(Q, { s: 4, t: 0, c: 0.14, g: Math.max(Q.g, 0.3), f: L.f * 0.6, o: folk(p).o, tier: 1, sp: 0, temple: 0, mon: 0, fb: 0, help: 0, harm: 0, dt: 0 });
+  to._folk = null;
+  chron(to, `Settlers of the ${nm} arrive from ${from}${kind === 'star' ? `, a world of the star ${properName(s.seed)}` : ''}, and stay`);
+  chron(p, `A colony is founded on ${there}${kind === 'star' ? `, a world of the star ${properName(sh.s2.seed)}` : ''}`);
+  note(`A ship of the ${nm} from ${from} has landed on ${there}`, 9);
+}
+function updateShips(dt, now) {
+  for (let i = ships.length - 1; i >= 0; i--) {
+    const sh = ships[i], { p, s, to, s2 } = sh, L = p.life, g = s.gal;
+    const lost = !L || L.s < 4 || !g || !g.alive || !g.stars.includes(s) || !s.planets.includes(p) || (sh.kind === 'moon' ? !p.moons.includes(to) : !g.stars.includes(s2) || !s2.planets.includes(to));
+    if (lost) { if (L) L.out = 0; ships.splice(i, 1); continue; }
+    sh.t += dt * T.lifeSpeed / sh.dur;
+    const k = clamp01(sh.t), e = ease(k);
+    let ax, ay, bx, by, f = e, show = false;
+    if (s2 === s) { if (focusS === s && E2 > 0.5 && E4 < 0.5) { ax = p.wx; ay = p.wy; bx = to.wx; by = to.wy; show = true; } }
+    else if (focusG === g && E1 > 0.5 && E4 < 0.5) {
+      const far = Math.max(viewW, viewH) * 0.75;
+      let dx = s2.u - s.u, dy = s2.v - s.v; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+      if (E2 < 0.5) { ax = s.wx; ay = s.wy; bx = s2.wx; by = s2.wy; show = true; }
+      else if (focusS === s && k < 0.3) { ax = p.wx; ay = p.wy; bx = ax + dx * far; by = ay + dy * far; f = k / 0.3; f *= f; show = true; }       // leaving
+      else if (focusS === s2 && k > 0.7) { bx = to.wx; by = to.wy; ax = bx - dx * far; ay = by - dy * far; f = (k - 0.7) / 0.3; f = 1 - (1 - f) * (1 - f); show = true; } // arriving
+    }
+    if (show) {
+      const lx = bx - ax, ly = by - ay, bow = Math.sin(f * Math.PI) * 0.1, x = ax + lx * f - ly * bow, y = ay + ly * f + lx * bow, z = 0.045 + 0.02 * E2;
+      spawn(x, y, 0, 0, 0, 0, 2.6, 2.4, 1.9, 0.12, z * 1.5);
+      for (let n = 0; n < 2; n++) spawn(x + rnd(0.02), y + rnd(0.02), 0, rnd(0.06), rnd(0.06), 0, 1.0, 0.75, 0.4, 0.5 + Math.random() * 0.5, z);
+    }
+    if (sh.t >= 1) { ships.splice(i, 1); arrive(sh); }
+  }
+  // close to a world that has taken to the sky: craft in orbit, and ferries out to any moon they have settled
+  const p = focusP, L = p && p.life;
+  if (p && L && L.s === 4 && L.sp >= 1 && level === 3 && E3 > 0.9 && E4 < 0.3) {
+    for (let n = 0; n < Math.min(3, Math.floor(L.sp)); n++) {
+      const a = now * (0.55 + n * 0.13) + n * 2.1, tl = 0.25 - n * 0.3, ex = Math.cos(a) * globeR * (1.16 + n * 0.07), ey = Math.sin(a) * globeR * 0.2;
+      spawn(p.wx + ex * Math.cos(tl) - ey * Math.sin(tl), p.wy + ex * Math.sin(tl) + ey * Math.cos(tl), 0, 0, 0, 0, 1.8, 1.7, 1.4, 0.3, 0.04);
+    }
+    p.moons.forEach((m, n) => {
+      if (!m.col) return;
+      const ph = (now / 11 + n * 0.37) % 1, f = ph < 0.5 ? ph * 2 : 2 - ph * 2, dx = m.wx - p.wx, dy = m.wy - p.wy, d = Math.hypot(dx, dy) || 1, a0 = globeR * 1.03 / d;
+      spawn(p.wx + dx * (a0 + (1 - a0) * f), p.wy + dy * (a0 + (1 - a0) * f), 0, 0, 0, 0, 1.6, 1.2, 0.7, 0.35, 0.035);
+      spawn(m.wx + m.wr * 1.15, m.wy + m.wr * 0.2, 0, 0, 0, 0, 1.5, 1.1, 0.5, 0.2, 0.03); // the lamp of the colony
+    });
+  }
 }
 
 // ---------------------------------------------------------------- down on the surface
@@ -1842,38 +1996,29 @@ function enterLand(lon, lat) {
   u.uAirT.value = air; u.uDamp.value = damp; u.uRing.value = p.rings; u.uMoons.value = p.moons.length; u.uAir.value = planetKind(p) === 'ocean' ? 1 : 0.8;
   u.uVeg.value = veg; u.uCivL.value = L ? L.c * suit : 0; faithColor(L ? L.f : 0, u.uCivCol.value);
   land = { name: `${name}, ${zone}`, air, weather: damp > 0.6 ? 1 : 0, sunX: 0.42, sunY: 0.74, pan: 0, panV: 0, panAt: -10, flash: 0,
-    lon, lat, k, dampBase, under, chosen: false, since: 0, tick: 0, told: -1 }; // where on the world this is, for the weather to work on
+    lon, lat, k, dampBase, under, chosen: false, since: 0, tick: 0, told: -1, sig: civSig(L) }; // where on the world this is, for the weather to work on
   populateLand(p, lon, lat); lifeAmounts(L, suit);
   u.uSun.value.set(land.sunX, land.sunY); u.uCloud.value = WEATHER[land.weather][1]; u.uRain.value = u.uFog.value = u.uFlash.value = 0; u.uPan.value = 0;
   for (const hd of [hands.Left, hands.Right]) { hd.release(); hd.dwell = null; hd.rest = null; hd.charge = 0; }
   setLevel(4); warp(1);
-  note(`${name}. The climate here is ${zone}. Point and hold to change the weather; storms water the land.`, 7);
+  syncBar();
+  note(`${name}. The climate here is ${zone}. Your hands can rest: drag with the mouse to look around.`, 7);
 }
 
-// what each gesture does once you are standing there
-function landAct(hand, now, dt) {
-  const g = hand.gesture;
-  if (!land || zoomLock) return;
-  if (g === 'open') {
-    if (hand.charge >= T.minCharge) { land.flash = 1; landMat.uniforms.uBoltX.value = hand.pos.x / (viewH * LAND_M); hand.lastBurst = now; if (focusP && focusP.life && focusP.life.s === 4) { smite(focusP, 0.08); note('They cower from your lightning', 3); } } // a gathered fist let go: lightning
-    hand.charge = 0;
-    const sp = Math.abs(hand.vel.x);
-    if (sp > 0.6) { land.panV += (-hand.vel.x * (sp - 0.6) / sp / (viewH * LAND_M) / 0.8 - land.panV) * 0.3; land.panAt = now; } // a sweep of the hand turns you round on the spot
-  } else if (g === 'fist') {
-    hand.charge = Math.min(1, hand.charge + dt / 2.2); hand.fistAt = now;
-  } else if (g === 'pinch') { // take hold of the sun: day, dusk and night are wherever you put it
-    const q = hand.pinchPt, k = Math.min(1, dt * 6);
-    land.sunX += wrapTurn(q.x / (viewH * LAND_M) + land.pan - land.sunX) * k; // kept as a bearing, so it stays put in the sky when you turn
-    land.sunY += (THREE.MathUtils.clamp(0.5 + q.y / (viewH * LAND_M), 0.12, 0.95) - land.sunY) * k;
-  } else if (g === 'point') { // a finger held up changes the weather, and goes on to the next kind while it stays
-    const d = hand.dwell || (hand.dwell = { t: now, step: -1 });
-    const n = Math.floor((now - d.t - T.climateHold) / T.climateStep);
-    if (n >= 0 && n > d.step) {
-      d.step = n; land.weather = (land.weather + 1) % WEATHER.length; land.chosen = true; land.since = 0;
-      note(land.weather === 2 && land.air < 0.08 ? 'Snowstorm' : WEATHER[land.weather][0], 2);
-    }
-  }
+// Down here the hands rest: the ground is worked with the mouse and the keyboard.
+function setWeather(i) {
+  if (level !== 4 || !land) return;
+  land.weather = i; land.chosen = true; land.since = 0; syncBar();
+  note(i === 2 && land.air < 0.08 ? 'Snowstorm' : WEATHER[i][0], 2);
 }
+function bolt(x) {
+  if (level !== 4 || !land) return;
+  land.flash = 1; landMat.uniforms.uBoltX.value = x;
+  const p = focusP;
+  if (p && p.life && p.life.s === 4) { smite(p, 0.08, `Lightning strikes at your command, and the ${folk(p).name} cower`); note('They cower from your lightning', 3); }
+}
+function syncBar() { if (land) document.querySelectorAll('#landBar [data-w]').forEach(b => b.classList.toggle('sel', +b.dataset.w === land.weather)); }
+const civSig = L => (!L ? '' : (L.s === 4 ? `${L.tier}${L.temple}${L.mon}${L.sp >= 1 ? 1 : 0}` : 'x') + Math.round(L.ruin * 7));
 
 // The weather you call is real. A storm waters the country around where you stand, a little more for every
 // moment it rains; clear skies that you chose yourself slowly bake it dry. Cloud and mist leave it be.
@@ -1888,6 +2033,11 @@ function landWeather(dt, now) {
     const to = rain ? 1 : -1, rate = step * (rain ? 0.11 : 0.05);
     brush(land.lon, land.lat, 0.32, (k, q) => { const w = 1 - q * q; mapM[k] += (to - mapM[k]) * Math.min(1, w * rate); });
     touched(now);
+    const Lp = p.life;
+    if (rain && Lp && Lp.s === 4 && Lp.ev && DISASTERS[Lp.ev.k][2] < 0 && !Lp.ev.ans) {
+      Lp.ev.ans = 1; Lp.f = Math.min(1, Lp.f + 0.18); Lp.help++;
+      chron(p, `You send rain in the midst of ${DISASTERS[Lp.ev.k][0].toLowerCase()}; the ${folk(p).name} give thanks`); note(`The ${folk(p).name} give thanks for the rain`, 5);
+    }
     if (land.told !== land.weather) { land.told = land.weather; note(rain ? (land.air < 0.08 ? 'Snow is settling on the land' : 'Rain is soaking the land') : 'The land is drying out', 4); }
   }
   // and the view answers: the ground darkens and greens, or pales
@@ -1897,14 +2047,18 @@ function landWeather(dt, now) {
   u.uVeg.value += ((L ? clamp01(L.g * 1.5) * suit : 0) - u.uVeg.value) * e;
   u.uCivL.value += ((L ? L.c * suit : 0) - u.uCivL.value) * e;
   if (L) faithColor(L.f, u.uCivCol.value);
+  if (civSig(L) !== land.sig) { land.sig = civSig(L); populateLand(p, land.lon, land.lat); } // something was built, or fell
   lifeAmounts(L, suit);
 }
 
 function updateLand(dt, now) {
   if (E4 <= 0 || !land) { landMesh.visible = lifeMesh.visible = false; if (level < 4 && E4 <= 0) land = null; return; }
   const u = landMat.uniforms, w = WEATHER[land.weather], k = Math.min(1, dt * 1.2);
+  const key = (...ks) => (ks.some(q => landKeys.has(q)) ? 1 : 0), turn = key('ArrowRight', 'd') - key('ArrowLeft', 'a'), lift = key('ArrowUp') - key('ArrowDown');
+  if (level === 4 && turn) { land.panV += (turn * 1.1 - land.panV) * Math.min(1, dt * 5); land.panAt = now; }
+  if (level === 4 && lift) land.sunY = THREE.MathUtils.clamp(land.sunY + lift * dt * 0.3, 0.12, 0.95);
   if (now - land.panAt > 0.1) land.panV *= Math.exp(-2.5 * dt);
-  land.pan += land.panV * dt;
+  if (!landDrag || landDrag.sun) land.pan += land.panV * dt;
   land.flash *= Math.exp(-5 * dt);
   landWeather(dt, now);
   u.uCloud.value += (w[1] - u.uCloud.value) * k; u.uRain.value += (w[2] - u.uRain.value) * k; u.uFog.value += (w[3] - u.uFog.value) * k;
@@ -1918,7 +2072,7 @@ function updateLand(dt, now) {
 // ---------------------------------------------------------------- the living things you can see from the ground
 // Every world grows its own: its plants, its animals and its people are drawn once, from the planet's seed, as
 // a sheet of little cartoon pictures, and then stood about the hills wherever the land will have them.
-const ART_CELL = 128, ART_COLS = 8, ART_ROWS = 3, LIFE_MAX = 170;
+const ART_CELL = 128, ART_COLS = 8, ART_ROWS = 4, LIFE_MAX = 200;
 const artCanvas = document.createElement('canvas');
 artCanvas.width = ART_CELL * ART_COLS; artCanvas.height = ART_CELL * ART_ROWS;
 const artCtx = artCanvas.getContext('2d'), artTex = new THREE.CanvasTexture(artCanvas);
@@ -2091,6 +2245,18 @@ const HOMES = [
   (S, r, c) => { for (let k = 0; k < 3; k++) S.box(-17 + k * 3, -24 - k * 21, 34 - k * 6, 22, 7, k % 2 ? c.roof : c.wall); eyesOn(S, 0, -36, 2, 4.6, 0); S.limb(-13, -66, -24, -84, 0.3, 4, 2, c.wall).limb(13, -66, 24, -84, -0.3, 4, 2, c.wall); S.circ(0, -78, 9, c.lamp).circ(-2.5, -80.5, 3.6, '#fffbe6', false); },
 ];
 
+// the bigger works: a camp tent, two towers, a temple, the monument, a ruin, and a ship with its fire
+const WORKS = [
+  (S, r, c) => { S.poly([[-28, 0], [28, 0], [3, -42], [-3, -42]], c.roof); S.poly([[-8, 0], [8, 0], [0, -24]], c.dark, false); S.limb(0, -40, 0, -54, 0, 2.4, 2, c.dark); S.poly([[0, -54], [13, -50], [0, -45]], c.lamp); },
+  (S, r, c) => { S.box(-15, -100, 30, 100, 5, c.wall); S.box(-19, -106, 38, 11, 4, c.roof); S.limb(0, -106, 0, -120, 0, 4, 1.5, c.roof); for (let k = 0; k < 4; k++) for (const x of [-9, 3]) S.box(x, -90 + k * 19, 6, 10, 2, r() < 0.8 ? c.lamp : c.dark, false); S.box(-5, -14, 10, 14, 5, c.dark, false); },
+  (S, r, c) => { for (let k = 0; k < 4; k++) S.box(-22 + k * 4, -26 - k * 24, 44 - k * 8, 26, 5, k % 2 ? c.pale : c.wall); S.dome(0, -98, 10, 14, c.roof); for (let k = 0; k < 4; k++) S.box(-4, -19 - k * 24, 8, 10, 2, k ? c.lamp : c.dark, false); S.box(-24, -4, 48, 4, 1, c.roof, false); },
+  (S, r, c) => { S.box(-46, -8, 92, 8, 2, c.pale).box(-40, -16, 80, 8, 2, c.pale); for (const x of [-30, -10, 10, 30]) S.box(x - 4.5, -60, 9, 44, 2, c.wall); S.poly([[-46, -60], [46, -60], [0, -90]], c.roof); S.circ(0, -70, 7, c.lamp); S.box(-7, -16, 14, 0.1, 0, c.dark, false); S.circ(0, -99, 6.5, c.lamp).circ(-1.5, -101, 2.6, '#fffbe6', false); },
+  (S, r, c) => { S.box(-26, -9, 52, 9, 2, c.wall); S.box(-9, -24, 18, 16, 2, c.pale); S.limb(-13, -40, -29, -58, 0.2, 9, 7, c.pale); for (const [x, hh] of [[-12, 24], [-4, 31], [4, 29], [12, 20]]) S.box(x - 4, -58 - hh, 8, hh + 8, 4, c.pale); S.box(-16, -60, 32, 38, 9, c.pale); S.ell(0, -40, 9, 12, c.wall, false); eyesOn(S, 0, -41, 1, 6.5, 0); },
+  (S, r, c) => { S.poly([[-34, 0], [-34, -38], [-26, -30], [-19, -46], [-10, -20], [-10, 0]], c.grey); S.poly([[4, 0], [4, -24], [13, -33], [20, -15], [31, -22], [31, 0]], c.greyLo); S.box(-5, -15, 9, 15, 1, c.grey); S.circ(-18, -3, 5, c.greyLo).circ(18, -3, 4, c.grey).circ(-28, -44, 2.5, c.greyLo, false); S.box(-34, -14, 24, 3, 1, c.greyLo, false); },
+  (S, r, c) => { for (const sd of [-1, 1]) S.poly([[sd * 8, -34], [sd * 25, -6], [sd * 25, 0], [sd * 8, -12]], c.roof); S.ell(0, -56, 12.5, 46, c.pale); S.poly([[-10.5, -80], [10.5, -80], [0, -110]], c.roof); S.box(-11, -34, 22, 6, 2, c.roof, false); S.circ(0, -66, 6, c.lamp).circ(-1.5, -67.5, 2.2, '#fffbe6', false); S.box(-6, -10, 12, 10, 2, c.dark); },
+  S => { S.leaf(0, -114, 0, -22, 0.2, '#ff8a2a', false).leaf(0, -114, 0, -48, 0.17, '#ffd27a', false).leaf(0, -114, 0, -76, 0.12, '#fffbe6', false); },
+];
+
 function drawArt(p) {
   if (artSeed === p.seed) return;
   artSeed = p.seed;
@@ -2124,6 +2290,8 @@ function drawArt(p) {
   for (let v = 0; v < 4; v++) { const S = sketch(), tall = v < 2 ? 1 : 0.72; drawAlien(S, r, sp, v % 2 === 1, tall); S.draw(ctx, v, 2, Math.min(1.5, 108 / (sp.lh + sp.bh * tall + sp.hh * 2 + sp.arm + 14), 108 / (sp.bw * 2 + 40))); }
   const hc2 = { wall: hsl(hc + 20, 26, 70), roof: hsl(hc, 52, 46), dark: hsl(hc, 30, 18), lamp: '#ffd27a', pale: hsl(hc + 40, 30, 88) };
   for (let v = 0; v < 4; v++) { const S = sketch(); HOMES[v](S, r, hc2); S.draw(ctx, 4 + v, 2, 1); }
+  hc2.grey = hsl(hc + 20, 9, 56); hc2.greyLo = hsl(hc + 20, 9, 42);
+  for (let v = 0; v < 8; v++) { const S = sketch(); WORKS[v](S, r, hc2); S.draw(ctx, v, 3, v === 7 ? 1 : 0.92); }
   artTex.needsUpdate = true;
 }
 
@@ -2145,7 +2313,7 @@ const LIFE_SHARED = /* glsl */`
     uniform float uTime, uSeed, uAlpha, uRelief, uWater, uPan, uFog, uRain, uFlash;
     uniform vec2 uSun;
     uniform vec3 uAtm;
-    varying vec2 vUv, vP; varying float vI;
+    varying vec2 vUv, vP; varying float vI, vK;
     ${NOISE_GLSL}
     const float H0 = ${LAND_H0}, TURN = ${LAND_TURN.toFixed(2)};
     float wrapT(float x){ return x - TURN * floor(x / TURN + 0.5); }
@@ -2169,9 +2337,10 @@ const lifeMat = new THREE.ShaderMaterial({
     attribute vec4 a0, a1; attribute float a2;
     uniform float uS, uWorship; uniform vec3 uAmt;
     ${LIFE_SHARED}
+    float sc(float i){ float f = i / 5.0; return (0.55 + 0.45 * f) / (2.4 - 1.4 * f); }   // how big things are drawn at that range
     void main(){
       float kind = a2, B = a0.x, i = a0.y, ph = a1.z, size = a0.w, flip = 1.0, hop = 0.0, cell = a1.x;
-      float amt = kind < 0.5 ? uAmt.x : kind < 1.5 ? uAmt.y : uAmt.z;
+      float amt = kind < 0.5 ? uAmt.x : kind < 1.5 ? uAmt.y : kind > 3.5 && kind < 4.5 ? 1.0 : uAmt.z, climb = 0.0;
       if (kind > 0.5 && kind < 1.5) {                              // animals amble to and fro, and face the way they go
         float t = uTime * 0.09 + ph, v = cos(t) * 0.4 + cos(t * 2.7 + 1.0) * 0.324;
         B += sin(t) * 0.4 + sin(t * 2.7 + 1.0) * 0.12; flip = v < 0.0 ? -1.0 : 1.0;
@@ -2180,11 +2349,24 @@ const lifeMat = new THREE.ShaderMaterial({
         B += sin(uTime * 0.06 + ph) * 0.1; hop = abs(sin(uTime * 3.0 + ph * 5.0)) * 0.5;
         if (uWorship > 0.5 && sin(uTime * 1.4 + ph * 3.0) > -0.2) cell += 1.0;
       }
-      float y0 = skyline(B, i) - a0.z;
-      float yW = uWater > 0.0 ? H0 - 0.012 - (1.0 - smoothstep(0.3, 1.0, uWater)) * 0.2 : -1.0;
+      if (kind > 4.5) {                                            // the ship stands, shakes, and goes up on its fire
+        float t = fract(uTime / 46.0 + ph), u = max(0.0, t - 0.8) / 0.2;
+        climb = u * u * 1.5; B += sin(uTime * 60.0) * 0.0012 * step(0.76, t);
+        if (kind > 5.5 && t < 0.78) amt = -1.0;                    // no fire until it lights
+      }
+      vK = kind;
+      float yW = uWater > 0.0 ? H0 - 0.012 - (1.0 - smoothstep(0.3, 1.0, uWater)) * 0.2 : -1.0, dz = a0.z;
+      if (kind > 2.5 && i < 4.5 && skyline(B, i) - dz < yW + 0.004) {   // its plot is under water here: build on the far shore, or failing that close by
+        float i0 = i; i = 3.0;
+        if (skyline(B, 3.0) - dz < yW + 0.004) i = 2.0;
+        if (i < 2.5 && skyline(B, 2.0) - dz < yW + 0.004) i = uWater < 0.9 ? 5.0 : i0;
+        float k = sc(i) / sc(i0); size *= k; dz *= k;
+      }
+      float y0 = skyline(B, i) - dz;
       vec2 c = position.xy;
       vUv = vec2((cell + (flip > 0.0 ? c.x : 1.0 - c.x)) / ${ART_COLS}.0, 1.0 - (a1.y + 1.0 - c.y) / ${ART_ROWS}.0);
-      vec2 q = vec2(wrapT(B - uPan) + (c.x - 0.5) * size, y0 - 0.085 * size + c.y * size + hop * 0.05 * size);
+      vec2 q = vec2(wrapT(B - uPan) + (c.x - 0.5) * size, y0 - 0.085 * size + c.y * size + hop * 0.05 * size + climb);
+      if (kind > 5.5) { q.y -= size * 0.9; q.x += (c.x - 0.5) * size * 0.25 * sin(uTime * 37.0 + c.y * 9.0) * (1.0 - c.y); }
       if (kind < 0.5) q.x += sin(uTime * 1.1 + ph) * 0.04 * size * c.y * c.y;   // plants sway from the root
       vP = q; vI = i;
       bool hide = a1.w > amt || (i < 4.5 && y0 < yW + 0.004) || (i > 4.5 && uWater >= 0.9);
@@ -2211,6 +2393,9 @@ const lifeMat = new THREE.ShaderMaterial({
       vec3 col = mix(lit, gHz, hz * 0.45);
       col += vec3(0.8, 0.85, 1.0) * 0.12 * uFlash;
       col = mix(col, gHz, uFog * 0.3) * 0.8;
+      float lamp = smoothstep(0.3, 0.12, distance(t.rgb, vec3(1.0, 0.824, 0.478))) * step(2.5, vK);   // lit windows carry on into the night
+      col += t.rgb * lamp * (1.0 - 0.9 * gDay) * 1.1;
+      if (vK > 5.5) col = t.rgb * 1.5;                             // and fire is its own light
       gl_FragColor = vec4(col * t.a * uAlpha, t.a * uAlpha);
     }`,
   blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
@@ -2234,9 +2419,24 @@ function populateLand(p, lon, lat) {
   }
   for (let n = 0; n < 20; n++) put(1, r() * LAND_TURN, [3, 4, 4, 5, 5][(r() * 5) | 0], 0.01 + r() * 0.07, 0.1 + r() * 0.035, (r() * ART_COLS) | 0, 1, n < 5 ? 0.05 : r());
   const towns = [r() * LAND_TURN, r() * LAND_TURN, r() * LAND_TURN];
-  for (let n = 0; n < 9; n++) put(3, towns[n % 3] + (r() - 0.5) * 0.7, [3, 4, 4, 5][(r() * 4) | 0], 0.006 + r() * 0.03, 0.2 + r() * 0.07, 4 + ((r() * 4) | 0), 2, n < 3 ? 0.05 : r());
   for (let n = 0; n < 18; n++) put(2, towns[n % 3] + (r() - 0.5) * 0.9, [4, 4, 5, 5][(r() * 4) | 0], 0.03 + r() * 0.07, 0.125 + r() * 0.02, ((r() * 2) | 0) * 2, 2, n < 5 ? 0.05 : r());
-  list.sort((a, b) => a.i - b.i || a.d - b.d); // far to near, so the near ones are drawn over the far
+  // What has been built, by how far these people have come: tents, then houses, then towers in the middle of
+  // the largest places. Whatever stood on a plot that is now empty is a ruin there, while the ruins last.
+  const L = p.life, civ = L && L.s === 4, tier = civ ? L.tier : -1, rb = seeded(((p.seed | 0) ^ Math.imul((lon * 977) | 0, 31337) ^ Math.imul((lat * 1291) | 0, 2713) ^ 0x7f4a7c15) | 0);
+  const full = tier < 0 ? [0, 0, 0] : [[3, 0, 0], [4, 3, 0], [5, 4, 3], [7, 6, 5]][tier], tall = tier < 2 ? [0, 0, 0] : tier === 2 ? [1, 0, 0] : [3, 2, 1], empty = [];
+  for (let t = 0; t < 3; t++) for (let j = 0; j < 7; j++) {
+    const B = towns[t] + (j % 2 ? 1 : -1) * Math.ceil(j / 2) * 0.15 + (rb() - 0.5) * 0.07, i = [4, 4, 3, 5, 4, 3, 5][j], d = 0.006 + rb() * 0.03, home = 4 + ((rb() * 4) | 0), big = rb();
+    if (j >= full[t]) empty.push([j, B, i, d]);
+    else if (tier === 0) put(3, B, i, d, 0.15 + big * 0.04, 0, 3, 0.01);
+    else if (j < tall[t]) put(3, B, i, d, 0.33 + big * 0.1, 1 + (home & 1), 3, 0.01);
+    else put(3, B, i, d, 0.2 + big * 0.07, home, 2, 0.01);
+  }
+  empty.sort((a, b) => a[0] - b[0]);
+  for (let n = 0, m = Math.min(empty.length, Math.round((L ? L.ruin : 0) * 7)); n < m; n++) put(4, empty[n][1], empty[n][2], empty[n][3], 0.19, 5, 3, 0);
+  if (civ && L.temple) put(3, towns[0] + 0.52, 4, 0.02, 0.34, 3, 3, 0.01);
+  if (civ && L.mon) put(3, towns[1] - 0.5, 4, 0.03, 0.3, 4, 3, 0.01);
+  if (civ && L.sp >= 1) { put(5, towns[0] - 0.8, 3, 0.012, 0.3, 6, 3, 0.01); const ship = list[list.length - 1]; put(6, ship.B, 3, 0.012, 0.3, 7, 3, 0.01); const fire = list[list.length - 1]; fire.ph = ship.ph; fire.d = ship.d; fire.size = ship.size; }
+  list.sort((a, b) => a.i - b.i || a.d - b.d || a.kind - b.kind); // far to near, so the near ones are drawn over the far
   const a0 = lifeGeo.attributes.a0, a1 = lifeGeo.attributes.a1, a2 = lifeGeo.attributes.a2, n = Math.min(list.length, LIFE_MAX);
   for (let k = 0; k < n; k++) for (let v = 0; v < 4; v++) {
     const o = list[k], j = k * 4 + v;
@@ -2418,7 +2618,7 @@ class Hand {
   }
 
   drawSkeleton() {
-    const show = this.active && this.hasJoints;
+    const show = this.active && this.hasJoints && E4 < 0.5;
     this.lines.visible = this.dots.visible = show;
     if (!show) return;
     const lp = this.lines.geometry.attributes.position, dp = this.dots.geometry.attributes.position;
@@ -2472,8 +2672,8 @@ class Hand {
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
     if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
 
-    if (level === 4) { // standing on the ground, every gesture means something else
-      landAct(this, now, dt);
+    if (level === 4) { // standing on the ground the hands are at rest
+      this.charge = 0;
       if (g !== 'none') this.lastSolid = g;
       this.prevTip.copy(this.tips[1]);
       return;
@@ -2731,6 +2931,11 @@ function refreshChrome() {
   whereEl.textContent = whereText();
   upBtn.hidden = !entered || level === 0;
   savesBtn.hidden = !entered;
+  const world = entered && level >= 3 && focusP && isSolid(focusP);
+  document.body.classList.toggle('land', entered && level === 4);
+  document.getElementById('landBar').hidden = !(entered && level === 4);
+  document.getElementById('histBtn').hidden = !world;
+  if (!world) { document.getElementById('chron').hidden = true; document.getElementById('histBtn').classList.remove('lit'); }
 }
 upBtn.addEventListener('click', e => { surface(); e.currentTarget.blur(); });
 window.addEventListener('keydown', e => { if ((e.key === 'b' || e.key === 'B' || e.key === 'Backspace') && !e.ctrlKey && !e.metaKey && !e.altKey && entered) surface(); });
@@ -2747,9 +2952,10 @@ function snapshot() {
       stars: g.stars.map(s => ({ u: r(s.u), v: r(s.v), grow: r(s.grow), seed: s.seed,
         planets: s.planets.map(p => ({ r: r(p.r), a: r(p.a), grow: r(p.grow), seed: p.seed, rings: r(p.rings),
           map: p.map || undefined, sea: p.sea == null ? undefined : r(p.sea), wind: p.wind === 1 ? undefined : r(p.wind), spots: p.spots.length ? p.spots.map(q => q.map(r)) : undefined,
-          life: p.life && (p.life.s || p.life.t > 0 || p.life.ev) ? { s: p.life.s, t: r(p.life.t), g: r(p.life.g), c: r(p.life.c), f: r(p.life.f), ev: p.life.ev ? [p.life.ev.k, Math.round(p.life.ev.left)] : undefined } : undefined,
+          life: p.life && (p.life.s || p.life.t > 0 || p.life.ev || p.life.hist.length > 1 || p.life.ruin > 0) ? { s: p.life.s, t: r(p.life.t), g: r(p.life.g), c: r(p.life.c), f: r(p.life.f), ev: p.life.ev ? [p.life.ev.k, Math.round(p.life.ev.left)] : undefined,
+            y: Math.round(p.life.y), h: p.life.hist, ru: r(p.life.ruin), b: [p.life.temple, p.life.mon, p.life.fb, p.life.dt, p.life.help, p.life.harm, p.life.gen], sp: r(p.life.sp), o: p.life.o || undefined } : undefined,
           scars: p.scars.length ? p.scars.map(q => q.map(r)) : undefined,
-          moons: p.moons.map(m => ({ d: r(m.d), a: r(m.a), seed: m.seed })) })) })) })),
+          moons: p.moons.map(m => ({ d: r(m.d), a: r(m.a), seed: m.seed, col: m.col ? 1 : undefined })) })) })) })),
     nebulae: nebulae.map(n => ({ space: n.space, x: r(n.x), y: r(n.y), rot: r(n.rot), size: r(n.size), pal: n.pal, ci: n.ci, seed: r(n.seed) })) };
 }
 function saveUniverse() {
@@ -2762,7 +2968,7 @@ function clearUniverse() {
   for (const h of [hands.Left, hands.Right]) h.release();
   for (const g of galaxies) if (g.alive) killGalaxy(g);
   while (nebulae.length) dropNebula(nebulae[0]);
-  nebula = null; sculpt = null; nextId = 1;
+  nebula = null; sculpt = null; nextId = 1; ships.length = 0;
   level = 0; depth = 0; zoomNudge = 0; zoomHeld = 0; zoomOn = false; zoomKey = null; zoomLock = false; focusG = focusS = focusP = null; land = null; terrainOf = null; terrainDirty = false;
 }
 function applySnapshot(d) {
@@ -2776,7 +2982,9 @@ function applySnapshot(d) {
       const st = mkStar(a.u, a.v, a.grow, a.seed);
       st.planets = (a.planets || []).map(b => { const p = mkPlanet(b.r, b.a, b.grow, b.seed); p.rings = b.rings || 0; p.moons = (b.moons || []).map(m => ({ ...m }));
         p.map = b.map || null; p.sea = b.sea ?? null; p.wind = b.wind ?? 1; p.spots = (b.spots || []).map(q => [...q]); p.scars = (b.scars || []).map(q => [...q]);
-        if (b.life) Object.assign(lifeOf(p), { s: b.life.s | 0, t: +b.life.t || 0, g: +b.life.g || 0, c: +b.life.c || 0, f: +b.life.f || 0, ev: b.life.ev ? { k: b.life.ev[0] % DISASTERS.length, left: b.life.ev[1] } : null });
+        if (b.life) Object.assign(lifeOf(p), { s: b.life.s | 0, t: +b.life.t || 0, g: +b.life.g || 0, c: +b.life.c || 0, f: +b.life.f || 0, ev: b.life.ev ? { k: b.life.ev[0] % DISASTERS.length, left: b.life.ev[1] } : null,
+          y: +b.life.y || 0, hist: Array.isArray(b.life.h) ? b.life.h.filter(e => Array.isArray(e) && typeof e[1] === 'string').map(e => [+e[0] || 0, e[1]]) : [], ruin: +b.life.ru || 0, sp: +b.life.sp || 0, o: b.life.o | 0,
+          tier: tierOf(+b.life.c || 0), ...Object.fromEntries(['temple', 'mon', 'fb', 'dt', 'help', 'harm', 'gen'].map((k, i) => [k, (b.life.b && b.life.b[i]) | 0])) });
         return p; });
       return st;
     });
@@ -2971,10 +3179,15 @@ function chime() {
 
 // ---------------------------------------------------------------- the settings window
 const setEl = document.getElementById('settings'), setBtn = document.getElementById('setBtn');
+// the surface is the one place worked by mouse and keyboard
+const SURFACE_KEYS = [['Drag', 'turn on the spot and look around'], ['A / D or ← / →', 'turn left and right'], ['Drag the sun', 'move it across the sky: day, dusk, night'],
+  ['Scroll or ↑ / ↓', 'raise and lower the sun'], ['1 2 3 4', 'clear skies, clouds, storm, mist. Storms water the land; clear skies you chose dry it'], ['Space', 'the next kind of weather'],
+  ['Double-click or L', 'lightning, where the pointer is'], ['C', 'the history of this world'], ['B or Backspace', 'leave, back up to the planet']];
 const VIEWS = [['Universe view', [0]], ['Galaxy view', [1]], ['Solar system view', [2]], ['Planet view', [3, 4]], ['Surface view', [5]]];
 function renderControls(v) {
   const [, rows] = VIEWS[v], box = document.getElementById('ctlList');
-  box.innerHTML = rows.map(r => (rows.length > 1 ? `<h3>${r === 3 ? 'A world with ground' : 'A gas or ice giant'}</h3>` : '') + '<ul>'
+  if (v === 4) box.innerHTML = '<p class="fine" style="margin:0 0 10px">Down on the surface your hands can rest: it is worked with the mouse and keyboard, or the buttons along the bottom.</p><ul>' + SURFACE_KEYS.map(([k, t]) => `<li><b>${k}</b>${t}</li>`).join('') + '</ul>';
+  else box.innerHTML = rows.map(r => (rows.length > 1 ? `<h3>${r === 3 ? 'A world with ground' : 'A gas or ice giant'}</h3>` : '') + '<ul>'
     + Object.values(LEGEND).map(l => l[r]).filter(t => !/nothing down here/.test(t)).map(t => `<li>${t}</li>`).join('') + '</ul>').join('');
   document.querySelectorAll('#ctlTabs button').forEach((b, i) => b.classList.toggle('sel', i === v));
 }
@@ -3026,6 +3239,80 @@ window.addEventListener('keydown', e => {
   if (e.key === 's' || e.key === 'S') showSettings(setEl.hidden); else if (e.key === 'Escape') showSettings(false);
 });
 T.lifeSpeed = settings.pace;
+
+// ---------------------------------------------------------------- a world's history, to read
+const chronEl = document.getElementById('chron'), histBtn = document.getElementById('histBtn');
+function renderChron(list = true) {
+  const p = focusP, L = p && p.life;
+  if (!p || !L || level < 3 || !isSolid(p)) return showChron(false);
+  const F = L.s === 4 ? folk(p) : null, n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  document.getElementById('chronTitle').textContent = `History of ${properName(p.seed)}`;
+  document.getElementById('chronFolk').textContent = `Year ${Math.round(L.y).toLocaleString()}. ` + (F ? `The ${F.name}, ${F.traitText}, live here in ${TIERS[L.tier]}. ${mood(L.f)}.`
+    + (L.help || L.harm ? ` They remember ${[L.help ? n(L.help, 'kindness', 'kindnesses') : '', L.harm ? n(L.harm, 'injury', 'injuries') : ''].filter(Boolean).join(' and ')} from you.` : '')
+    + (L.sp >= 1 ? ' They have taken to the sky.' : '') : L.s ? `${STAGE_SHORT[L.s]} live here. ${L.gen ? 'Its people are gone.' : 'No people yet.'}` : 'Nothing lives here yet.');
+  if (!list) return;
+  histDirty = false;
+  document.getElementById('chronList').replaceChildren(...L.hist.slice().reverse().map(([y, t]) => {
+    const li = document.createElement('li'), b = document.createElement('b');
+    b.textContent = `Year ${y.toLocaleString()}`; li.append(b, t);
+    return li;
+  }));
+}
+function showChron(on) {
+  if (on && !(entered && level >= 3 && focusP && isSolid(focusP))) { if (entered) note('Every world keeps its own history. Go to a planet with ground to read it.', 4); on = false; }
+  chronEl.hidden = !on; histBtn.classList.toggle('lit', on);
+  if (on) renderChron();
+}
+histBtn.addEventListener('click', e => { showChron(chronEl.hidden); e.currentTarget.blur(); });
+document.getElementById('chronClose').addEventListener('click', () => showChron(false));
+
+// ---------------------------------------------------------------- the surface, by mouse and keyboard
+const landKeys = new Set(), stageEl = document.getElementById('stage');
+let landDrag = null, landMouse = 0;
+const landOn = () => entered && level === 4 && !!land;
+const landPt = e => ({ x: (e.clientX / innerWidth - 0.5) * viewW / (viewH * LAND_M), y: 0.5 + (0.5 - e.clientY / innerHeight) / LAND_M }); // the pointer, in the picture's own measure
+stageEl.addEventListener('pointerdown', e => {
+  if (!landOn() || e.button) return;
+  const q = landPt(e);
+  landDrag = { sun: Math.hypot(q.x - wrapTurn(land.sunX - land.pan), q.y - land.sunY) < 0.1, x: q.x, t: performance.now() / 1000 }; // on the sun: move the sun. Anywhere else: look around
+  stageEl.setPointerCapture(e.pointerId); stageEl.classList.add('drag');
+});
+stageEl.addEventListener('pointermove', e => {
+  if (!landOn()) return;
+  const q = landPt(e), now = performance.now() / 1000;
+  landMouse = q.x;
+  if (!landDrag) return;
+  if (landDrag.sun) { land.sunX = land.pan + q.x; land.sunY = THREE.MathUtils.clamp(q.y, 0.12, 0.95); }
+  else { const dx = q.x - landDrag.x; land.pan -= dx; land.panV = THREE.MathUtils.clamp(land.panV + (-dx / Math.max(0.008, now - landDrag.t) - land.panV) * 0.5, -3, 3); land.panAt = now; }
+  landDrag.x = q.x; landDrag.t = now;
+});
+const landDrop = () => { if (landDrag && land && performance.now() / 1000 - landDrag.t > 0.08) land.panV = 0; landDrag = null; stageEl.classList.remove('drag'); }; // let go while moving and it carries on round a little
+stageEl.addEventListener('pointerup', landDrop); stageEl.addEventListener('pointercancel', landDrop);
+stageEl.addEventListener('wheel', e => { if (!landOn()) return; land.sunY = THREE.MathUtils.clamp(land.sunY - e.deltaY * 0.0005, 0.12, 0.95); e.preventDefault(); }, { passive: false });
+stageEl.addEventListener('dblclick', e => { if (landOn()) bolt(landPt(e).x); });
+document.getElementById('landBar').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  b.blur();
+  if (b.dataset.w) setWeather(+b.dataset.w); else if (b.dataset.a === 'bolt') bolt((Math.random() - 0.5) * 0.9); else if (b.dataset.a === 'hist') showChron(chronEl.hidden); else surface();
+});
+window.addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (k === 'c' && entered) return showChron(chronEl.hidden);
+  if (k === 'Escape') showChron(false);
+  if (!landOn() || !setEl.hidden || !savesEl.hidden) return;
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'd'].includes(k)) { // held, it turns steadily; tapped, it gives a nudge
+    if (!e.repeat && k !== 'ArrowUp' && k !== 'ArrowDown') { land.panV += (k === 'ArrowRight' || k === 'd' ? 0.7 : -0.7); land.panAt = performance.now() / 1000; }
+    if (!e.repeat && (k === 'ArrowUp' || k === 'ArrowDown')) land.sunY = THREE.MathUtils.clamp(land.sunY + (k === 'ArrowUp' ? 0.02 : -0.02), 0.12, 0.95);
+    landKeys.add(k); e.preventDefault();
+  }
+  else if (k >= '1' && k <= '4') setWeather(+k - 1);
+  else if (k === ' ') { setWeather((land.weather + 1) % WEATHER.length); e.preventDefault(); }
+  else if (k === 'l' && !e.repeat) bolt(landMouse);
+});
+window.addEventListener('keyup', e => landKeys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+window.addEventListener('blur', () => landKeys.clear());
 
 // Nobody touches the screen while playing, so stop the device dimming or locking, and pick the
 // camera back up when the tab or app comes back to the front.
@@ -3098,6 +3385,7 @@ function frame() {
   updateBodies(dt, now);
   updateLand(dt, now);
   updateLife(dt);
+  updateShips(dt, now);
   if (onLand !== (E4 > 0.5)) { onLand = !onLand; if (landCost && settings.res === 'auto') setRatio(onLand ? Math.max(0.75, pixelRatio - landCost) : pixelRatio + landCost); }
   bloom.strength = (0.85 - 0.6 * E3 - 0.07 * E4) * settings.glow; // close to a planet the glow would wash its surface out
   updateParticles(dt);
@@ -3117,7 +3405,7 @@ function frame() {
 
   // gentle parallax toward the hands
   let tx = 0, ty = 0, n = 0;
-  for (const h of [L, R]) if (h.active) { tx += h.pos.x; ty += h.pos.y; n++; }
+  if (level < 4) for (const h of [L, R]) if (h.active) { tx += h.pos.x; ty += h.pos.y; n++; }
   if (n) { tx = tx / n * 0.06; ty = ty / n * 0.06; }
   camera.position.x += (tx - camera.position.x) * 0.04;
   camera.position.y += (ty - camera.position.y) * 0.04;
@@ -3130,8 +3418,9 @@ frame();
 // A handle for poking at things from the console. pose() stands in for the camera: call it every frame
 // with a hand's position and gesture and the rest of the game cannot tell the difference.
 window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, enter, surface, saveUniverse,
-  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, properName, titleOf, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, lifeMat, artCanvas, T, lifeOf, measureLife, get terrainOf() { return terrainOf; }, get globeR() { return globeR; }, globePoint, mapH,
+  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, properName, titleOf, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, lifeMat, lifeMesh, artCanvas, folk, chron, ships, launch, reach, setWeather, bolt, updateLife, showChron, T, lifeOf, measureLife, get terrainOf() { return terrainOf; }, get globeR() { return globeR; }, globePoint, mapH,
   get at() { return at; },
+  go(gi, si, pi) { focusG = galaxies[gi]; focusS = focusG.stars[si]; focusP = pi == null ? null : focusS.planets[pi]; setLevel(pi == null ? 2 : 3); depth = level; }, // straight to a star or a planet
   pose(key, x, y, gesture, tipX = x, tipY = y, size = 1) {
     const h = hands[key], fresh = !h.active; h.size = size;
     h.prevPos.copy(h.pos); h.pos.set(x, y, 0); h.hasJoints = false; h.pinchPt.set(x, y, 0);

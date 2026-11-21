@@ -21,7 +21,11 @@
     overscroll-behavior: none; touch-action: manipulation; -webkit-user-select: none; user-select: none;
     -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;
     font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
-  canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  body.land canvas#stage { cursor: grab; }
+  body.land canvas#stage.drag { cursor: grabbing; }
+  body.land #hud { display: none; }
+  body.land #cam.on { opacity: 0; pointer-events: none; }
   a { color: inherit; }
 
   /* brand mark, always present */
@@ -144,6 +148,29 @@
   #camBtn.off .slash { display: block; }
   #camBtn.off, #legendBtn.off { opacity: .7; }
 
+  /* down on the surface: weather, lightning, history and the way out, for the mouse */
+  #landBar { position: fixed; left: 0; right: 0; bottom: calc(76px + env(safe-area-inset-bottom)); z-index: 4; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 16px; pointer-events: none; }
+  #landBar[hidden] { display: none; }
+  #landBar .bar { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; pointer-events: auto; padding: 5px; border-radius: 24px; border: 1px solid var(--line); background: rgba(6,8,20,.62); backdrop-filter: blur(6px); }
+  #landBar button { padding: 8px 14px; font-size: 11px; letter-spacing: .1em; border-color: transparent; background: transparent; color: var(--dim); }
+  #landBar button:hover { color: var(--ink); background: rgba(74,168,255,.18); box-shadow: none; }
+  #landBar button.sel { border-color: var(--blue); background: rgba(74,168,255,.22); color: #fff; }
+  #landBar .sep { width: 1px; margin: 5px 4px; background: var(--line); }
+  #landBar .tip { font-size: 12px; color: var(--ink); opacity: .75; letter-spacing: .05em; text-align: center; text-shadow: 0 0 6px #000, 0 0 12px #000; }
+  @media (min-width: 1500px) { #landBar { bottom: calc(18px + env(safe-area-inset-bottom)); } }
+
+  /* a world's history */
+  #chron { position: fixed; left: calc(18px + env(safe-area-inset-left)); top: calc(126px + env(safe-area-inset-top)); bottom: 150px; width: min(390px, calc(100% - 36px)); z-index: 6; display: flex; align-items: flex-start; pointer-events: none; }
+  #chron[hidden] { display: none; }
+  #chron .panel { width: 100%; max-height: 100%; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; background: rgba(6,8,20,.8); }
+  #chron h2 { margin-bottom: 10px; }
+  #chronFolk { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--ink); }
+  #chronList { list-style: none; margin: 12px 0 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; }
+  #chronList li { padding: 8px 4px 8px 92px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.45; color: #b9c0de; }
+  #chronList b { display: inline-block; width: 92px; margin-left: -92px; color: var(--orange); font-weight: 500; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; }
+  #chron .row { margin-top: 0; align-items: center; }
+  #chron .row .fine { margin: 0; }
+
   /* settings: tabs across the top, one page at a time */
   #settings { position: fixed; inset: 0; z-index: 7; display: grid; place-items: center; padding: 20px; background: rgba(2,3,10,.6); }
   #settings[hidden] { display: none; }
@@ -176,6 +203,9 @@
     #palette { top: calc(64px + env(safe-area-inset-top)); }
     #where { top: calc(82px + env(safe-area-inset-top)); font-size: 10px; }
     #hud { bottom: calc(10px + env(safe-area-inset-bottom)); gap: 6px; padding: 0 10px; }
+    #landBar { bottom: calc(10px + env(safe-area-inset-bottom)); }
+    #landBar .tip { display: none; }
+    #chron { top: calc(104px + env(safe-area-inset-top)); bottom: 110px; }
     #legend { gap: 5px; }
     .chip { font-size: 11px; padding: 5px 10px; }
     .chip b { margin-right: 4px; }
@@ -206,6 +236,9 @@
   <button id="upBtn" class="ctl" type="button" aria-label="Zoom back out" title="Zoom back out (B)" hidden>
     <svg viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/><circle cx="12" cy="12" r="1.2"/></svg>
   </button>
+  <button id="histBtn" class="ctl" type="button" aria-label="History of this world" title="History of this world (C)" hidden>
+    <svg viewBox="0 0 24 24"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11M9 8h6M9 11h4"/></svg>
+  </button>
   <button id="legendBtn" class="ctl" type="button" aria-label="Toggle gesture guide" title="Hide gesture guide (H)" hidden>
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.6 2.3c-.8.5-1.2 1-1.2 1.9M12 17h.01"/></svg>
   </button>
@@ -232,6 +265,24 @@
   </div>
 </div>
 
+<aside id="chron" hidden>
+  <div class="panel" role="dialog" aria-label="History of this world">
+    <h2 id="chronTitle"></h2>
+    <p id="chronFolk"></p>
+    <ol id="chronList"></ol>
+    <div class="row"><span class="fine">C opens and closes this</span><button id="chronClose" type="button" class="quiet">Close</button></div>
+  </div>
+</aside>
+
+<div id="landBar" hidden>
+  <div class="bar">
+    <button type="button" data-w="0" title="Clear skies (1)">Clear</button><button type="button" data-w="1" title="Clouds (2)">Clouds</button><button type="button" data-w="2" title="Storm (3)">Storm</button><button type="button" data-w="3" title="Mist (4)">Mist</button>
+    <span class="sep"></span>
+    <button type="button" data-a="bolt" title="Lightning (L, or double-click)">Lightning</button><button type="button" data-a="hist" title="History of this world (C)">History</button><button type="button" data-a="up" title="Back up to the planet (B)">Leave</button>
+  </div>
+  <div class="tip">Drag to look around · drag the sun, or scroll, for the time of day · double-click for lightning · 1–4 weather</div>
+</div>
+
 <div id="settings" hidden>
   <div class="panel" role="dialog" aria-label="Settings">
     <div id="setTabs" class="tabs">
@@ -243,7 +294,7 @@
       <h3>Keyboard</h3>
       <ul class="keys">
         <li><b>S</b>this window</li><li><b>U</b>universes: save, load or start a new one</li><li><b>B or Backspace</b>zoom back out</li>
-        <li><b>H</b>show or hide the gesture guide</li><li><b>V</b>show or hide the camera view</li><li><b>F</b>full screen</li><li><b>Hold N</b>a new universe</li>
+        <li><b>C</b>the history of the world you are at</li><li><b>H</b>show or hide the gesture guide</li><li><b>V</b>show or hide the camera view</li><li><b>F</b>full screen</li><li><b>Hold N</b>a new universe</li>
       </ul>
     </section>
     <section data-tab="controls" hidden>
@@ -311,6 +362,6 @@
   <div id="hint"></div>
 </div>
 
-<script type="module" src="./main.js?v=58"></script>
+<script type="module" src="./main.js?v=59"></script>
 </body>
 </html>
