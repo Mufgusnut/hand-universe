@@ -16,7 +16,9 @@ const T = {
   curled: 1.35,      // below this = finger curled
   pinchOn: 0.32,     // thumb-index distance / hand size to start a pinch
   pinchOff: 0.5,     // ...and to release it
-  pinchHold: 0.4,    // seconds a pinch must be held in empty space before it makes something new
+  pinchHold: 1.0,    // seconds a pinch must be held in empty space, gathering light, before it makes something new
+  lockHold: 0.5,     // seconds a pinch must rest on something before it takes hold of it
+  pinchDrift: 0.7,   // ...and how far it may wander in that time: a pinch on the move is not asking for anything
   pointStraight: 0.88, // index finger straightness needed to count as pointing
   pointLead: 0.15,     // ...and how much straighter it must be than the other three fingers
   pinchIndexOpen: 0.6, // index straightness above which thumb-on-index is a pinch, not a fist
@@ -34,6 +36,8 @@ const T = {
   nebulaMin: 0.5,      // its width at that moment
   nebulaMax: 10,       // ...and the widest it can be pulled
   lifeSpeed: 1,        // how fast life and its troubles move along (1 = as designed)
+  pushGrow: 0.2,       // an open palm that grows this much bigger in the camera's eye has been pushed at the screen: go in
+  pushTime: 0.8,       // ...if it did so within this many seconds (slower than that is just drifting about)
   landHold: 1.0,       // two fingers rested this long on a spot of a planet take you down to stand there
   climateHold: 1.0,    // seconds a pointing finger must rest on a planet before the climate there changes
   climateStep: 1.5,    // ...and how long each climate lasts before it moves on to the next, if the finger stays
@@ -459,6 +463,30 @@ function acquireGalaxy(p) {
   return g;
 }
 
+// Light drawn in to a pinch that is about to make something: a ring closing, motes, a brightening spark.
+function gatherLight(q, k, now) {
+    const e = k * k * (3 - 2 * k), ringR = 1.15 * (1 - e) + 0.12, spin = now * 2.2;
+    pickColor(0.7);
+    for (let i = 0; i < 10; i++) { // a ring of light closing in, turning as it comes
+      const a = spin + i * TAU / 10 + rnd(0.3), b = (i % 2 ? 1.1 : 2.2) * (0.6 + 0.4 * k);
+      spawn(q.x + Math.cos(a) * ringR, q.y + Math.sin(a) * ringR, q.z, 0, 0, 0, cr * b, cg * b, cb * b, 0.2, 0.05 + 0.04 * k);
+    }
+    for (let i = 0; i < 5; i++) { // motes drawn in from further out
+      const a = Math.random() * TAU, r = ringR + 0.25 + Math.random() * 0.5, life = 0.32 + Math.random() * 0.12, v = r / life * 0.9;
+      pickColor(0.35);
+      spawn(q.x + Math.cos(a) * r, q.y + Math.sin(a) * r, q.z, -Math.cos(a) * v - Math.sin(a) * 0.6, -Math.sin(a) * v + Math.cos(a) * 0.6, 0, cr * 1.8, cg * 1.8, cb * 1.8, life, 0.045);
+    }
+    pickColor(0.9); // and the spark they feed, brightening
+    spawn(q.x + rnd(0.02), q.y + rnd(0.02), q.z, 0, 0, 0, cr * (0.6 + 1.8 * k), cg * (0.6 + 1.8 * k), cb * (0.6 + 1.8 * k), 0.14, 0.1 + 0.3 * k);
+}
+// ...and the brackets that turn and tighten round a thing a pinch is locking on to (e runs 0 to 1)
+function lockRing(x, y, z, R, e, now) {
+  pickColor(0.85);
+  for (let i = 0, n = Math.round(12 + R * 16); i < n; i++) {
+    const a = now * 1.6 * (1 - 0.7 * e) + (i % 4) * TAU / 4 + Math.random() * 0.75, b = 2 + 2 * e;
+    spawn(x + Math.cos(a) * R, y + Math.sin(a) * R, z, 0, 0, 0, cr * b, cg * b, cb * b, 0.18, 0.06 + 0.035 * e);
+  }
+}
 // A pinch picks up whatever is under or near it (the target is generous) and only makes something new in
 // empty space. A thing whose holder has stopped being tracked can be taken over, so a hand that the tracker
 // briefly loses or relabels carries on holding it. If the other hand really is holding it, this hand joins
@@ -473,6 +501,9 @@ function pinchPick(list, p, hand, now, create) {
     if (d < o.reach && d < bestD) { best = o; bestD = d; }
   }
   if (shared) { hand.assist = shared; return null; }
+  // Something loose is only picked up once the pinch has rested on it long enough to lock on. (A thing still
+  // marked as held is being handed over from a hand the tracker lost, and that is not made to wait.)
+  if (best && !best.held && !(hand.lockObj === best && hand.lockK >= 1)) { hand.lockSeen = best; return null; }
   if (best) {
     if (best.holder && best.holder !== hand && best.holder.grab === best) best.holder.grab = null;
     if (!best.held) best.growing = false;
@@ -592,9 +623,9 @@ function surface() {
   warp(-1);
 }
 
-// Two open hands are the zoom control, and going in and coming out are deliberately different moves so that
-// one is never taken for the other. Sweep the hands apart, from wherever they are: dive into the nearest
-// thing between them. Bring them together and keep them together for a moment: climb back out.
+// Going in and coming out are deliberately different moves so that one is never taken for the other. Push an
+// open palm at the screen: dive into what is under it. Bring both hands together and keep them together for
+// a moment: climb back out.
 function zoomTarget(x, y, wide) {
   const list = level === 0 ? galaxies : level === 1 && focusG ? focusG.stars : level === 2 && focusS ? focusS.planets : null;
   let best = null, bd = Infinity;
@@ -613,6 +644,18 @@ function handsTouch(L, R, d) {
   let best = Infinity;
   for (const a of L.joints) for (const b of R.joints) best = Math.min(best, Math.hypot(a.x - b.x, a.y - b.y));
   return best < size * T.zoomTouch;
+}
+// How hard is this palm being pushed at the screen? Read from how much bigger it has grown than it was at its
+// smallest in the last moment or so: a hand coming toward the camera swells, one drifting about does not.
+let pushWait = 0;
+function pushOf(h, now, ok) {
+  const tr = h.push || (h.push = []);
+  if (!ok || !h.active || h.gesture !== 'open' || !h.size) { if (!ok || now - (h.pushAt ?? -9) > 0.25) tr.length = 0; return 0; }
+  h.pushAt = now; tr.push(now, h.size);
+  while (tr.length && now - tr[0] > T.pushTime) tr.splice(0, 2);
+  let ref = Infinity;
+  for (let i = 1; i < tr.length; i += 2) ref = Math.min(ref, tr[i]);
+  return clamp01((h.size / ref - 1.05) / (T.pushGrow - 0.05));
 }
 function updateZoom(L, R, now, dt) {
   const fresh = Math.max(L.charge, R.charge) >= T.minCharge || now - Math.max(L.lastBurst, R.lastBurst) < 1.2; // that is a supernova, not a stroke
@@ -645,20 +688,29 @@ function updateZoom(L, R, now, dt) {
       zoomRested = zoomMeet && level > 0 && now >= zoomWait ? zoomRested + dt : 0;
     } else { zoomMeet = false; zoomRested = 0; }
     const outward = clamp01(zoomRested / T.zoomRest);
-    // in: how far the hands have parted since they were closest, aimed at the nearest thing between them
-    if (!zoomKey && d - zoomMin > 0.25) zoomKey = zoomTarget(mx, my, true);
-    const o = zoomKey, kind = o && o.kind;
-    const free = o && (kind === 'galaxy' ? (!focusG || focusG === o || depth < 0.02) : kind === 'star' ? (!focusS || focusS === o || depth < 1.02) : (!focusP || focusP === o || depth < 2.02));
-    const inward = free ? clamp01((d - zoomMin) / T.zoomPull) : 0;
-    if (inward > 0) {
-      if (kind === 'galaxy') focusG = o; else if (kind === 'star') focusS = o; else focusP = o;
-      nudge = inward * 0.25;
-      if (inward >= 1) { diveInto(o); nudge = 0; }
-    } else if (outward > 0) {
+    if (outward > 0) {
       nudge = -outward * 0.25;
-      if (outward >= 1) { surface(); zoomWait = now + T.zoomInDelay; zoomMeet = false; zoomRested = 0; zoomFar = 0; nudge = 0; }
+      if (outward >= 1) { surface(); zoomWait = now + T.zoomInDelay; zoomMeet = false; zoomRested = 0; zoomFar = 0; nudge = 0; pushWait = now + 1; }
     }
   }
+  // In: an open palm pushed at the screen goes into whatever is under it. A galaxy, a star, a planet, and
+  // from a planet down to the ground where the palm is.
+  if (!zoomLock && !fresh && level < 4 && now >= pushWait && zoomRested === 0) {
+    const pl = pushOf(L, now, true), pr = pushOf(R, now, true), hd = pl >= pr ? L : R, k = Math.max(pl, pr);
+    let went = false;
+    if (k > 0 && level === 3) {
+      if (k >= 1 && focusP && isSolid(focusP) && globePoint(hd.pos.x, hd.pos.y)) { enterLand(at.lon, at.lat); went = true; }
+    } else if (k > 0) {
+      const o = zoomTarget(hd.pos.x, hd.pos.y, false), kind = o && o.kind;
+      const free = o && (kind === 'galaxy' ? (!focusG || focusG === o || depth < 0.02) : kind === 'star' ? (!focusS || focusS === o || depth < 1.02) : (!focusP || focusP === o || depth < 2.02));
+      if (free) {
+        if (kind === 'galaxy') focusG = o; else if (kind === 'star') focusS = o; else focusP = o;
+        zoomKey = o; nudge = k * 0.25;
+        if (k >= 1) { diveInto(o); nudge = 0; went = true; }
+      }
+    }
+    if (went) { L.push.length = R.push.length = 0; pushWait = now + 1; }
+  } else { pushOf(L, now, false); pushOf(R, now, false); }
   zoomHeld = nudge; zoomShow = nudge !== 0;
   zoomNudge += (nudge - zoomNudge) * Math.min(1, dt * 10);
 }
@@ -712,6 +764,7 @@ function planetLook(p) {
   const t = planetT(p), set = t < 0.3 ? ROCKS : t < 0.55 ? WORLDS : t < 0.78 ? ICES : GASES;
   return { c: set[p.seed % set.length], gas: t < 0.55 ? 0 : 1, cloud: t < 0.3 ? 0.12 : 0.8 };
 }
+const MOON_IN = 1.45, MOON_SPAN = 1.1, MOON_SQ = 0.35; // a moon's orbit seen from its planet: nearest and furthest (in globe radii), and how flat it looks
 const moonLook = m => ({ c: ROCKS[m.seed % ROCKS.length], gas: 0, cloud: 0.1 });
 
 function newStar(p) {
@@ -901,7 +954,8 @@ function drawPlanet(i, x, y, r, seed, look, rings, lx, ly, alpha) {
   u.uA.value.copy(look.c[0]); u.uB.value.copy(look.c[1]); u.uC.value.copy(look.c[2]);
   u.uGas.value = look.gas; u.uCloud.value = look.cloud; u.uRing.value = rings;
   u.uSeed.value = seed % 100; u.uTilt.value = ((seed % 7) - 3) * 0.14; u.uLight.value.set(lx, ly);
-  u.uTime.value = bodyTime; u.uAlpha.value = alpha;
+  u.uTime.value = bodyTime; u.uAlpha.value = alpha; m.renderOrder = 2.6;
+  return m;
 }
 
 function updateBodies(dt, now) {
@@ -941,9 +995,17 @@ function updateBodies(dt, now) {
       if (p === fp) updateGlobe(dt, now, x, y, pr, -cx, -cy); // the far-off dot gives way to the real globe
       drawPlanet(np++, x, y, pr, p.seed, planetLook(p), p.rings, -cx, -cy, p === fp ? E2 * Math.max(0, 1 - E3 * 4) : fade);
       for (const m of p.moons) {
-        m.a += dt * 0.9 / (0.5 + m.d);
-        const md = pr * (1.7 + 3.3 * m.d) + 0.1 * z3;
-        drawPlanet(np++, x + Math.cos(m.a) * md, y + Math.sin(m.a) * md, sysR * (0.008 + (m.seed % 5) * 0.001) * shrink * z3, m.seed, moonLook(m), 0, -cx, -cy, fade);
+        const near = p === fp ? E3 : 0;
+        if (now - (m.heldAt ?? -9) > 0.25) m.a += dt * 0.9 / (0.5 + m.d) * (1 - 0.65 * near); // it waits while a hand is on it
+        const md = pr * (1.7 + 3.3 * m.d) + 0.1 * z3, ca = Math.cos(m.a), sa = Math.sin(m.a);
+        let mx = x + ca * md, my = y + sa * md, mr = sysR * (0.008 + (m.seed % 5) * 0.001) * shrink * z3;
+        if (near) { // up close the orbit is drawn in to fit the view, and seen nearly edge on
+          const md3 = globeR * (MOON_IN + MOON_SPAN * m.d);
+          mx += (x + ca * md3 - mx) * near; my += (y + sa * md3 * MOON_SQ - my) * near;
+          mr += (THREE.MathUtils.clamp(mr, globeR * 0.08, globeR * 0.2) - mr) * near;
+        }
+        m.wx = mx; m.wy = my; m.wr = mr;
+        drawPlanet(np++, mx, my, mr, m.seed, moonLook(m), 0, -cx, -cy, p === fp ? E2 : fade).renderOrder = near > 0.5 && sa < 0 ? 2.75 : 2.6; // the near half of the orbit passes in front of the globe
       }
       const o = orbitPool[no] || (orbitPool[no] = makeOrbit()); no++;
       o.visible = true; o.position.set(tx(0), ty(0), 0); o.scale.setScalar(Math.max(1e-3, R * z3)); o.material.opacity = (p.held ? 0.4 : 0.14) * fade;
@@ -1295,8 +1357,39 @@ const dirOf = (lon, lat, out) => out.set(Math.sin(lon) * Math.cos(lat), Math.sin
 
 // Pinch: held still it swells the land up into a dome; dragged it draws a craggy mountain range along the
 // path. On a giant it winds up a storm instead.
+function setMoon(m, q) { m.a = Math.atan2(q.y / MOON_SQ, q.x); m.d = clamp01((Math.hypot(q.x, q.y / MOON_SQ) / globeR - MOON_IN) / MOON_SPAN); }
+// Out in the space beside the planet a pinch is about moons: held still it gathers light and makes one, rested
+// on one that is there it locks on, and then the moon goes where the pinch goes until it is let go.
+function moonPinch(hand, now) {
+  const p = focusP, q = hand.pinchPt;
+  if (hand.moon) {
+    if (!p.moons.includes(hand.moon)) { hand.moon = null; return; }
+    setMoon(hand.moon, q); hand.moon.heldAt = now; markDirty();
+    return;
+  }
+  let best = null, bd = Infinity;
+  for (const m of p.moons) { const d = Math.hypot(m.wx - q.x, m.wy - q.y); if (d < m.wr + 0.7 && d < bd) { best = m; bd = d; } }
+  if (!hand.makeAt || hand.makeFor !== best || Math.hypot(q.x - hand.makeX, q.y - hand.makeY) > T.pinchDrift) { hand.makeAt = now; hand.makeX = q.x; hand.makeY = q.y; hand.makeFor = best; }
+  if (best) {
+    const k = (now - hand.makeAt) / T.lockHold;
+    best.heldAt = now;
+    if (k < 1) return lockRing(best.wx, best.wy, 0, best.wr * (2.1 - 0.7 * k * k), k, now);
+    hand.moon = best;
+    pickColor(0.9);
+    for (let i = 0; i < 40; i++) { const a = i / 40 * TAU, R = best.wr * 1.4; spawn(best.wx + Math.cos(a) * R, best.wy + Math.sin(a) * R, 0, -Math.cos(a) * 0.4, -Math.sin(a) * 0.4, 0, cr * 2.4, cg * 2.4, cb * 2.4, 0.35, 0.06); }
+    return;
+  }
+  const k = (now - hand.makeAt) / T.pinchHold;
+  if (k < 1) return gatherLight(q, k, now);
+  if (p.moons.length >= MOON_MAX) { note('This planet has all the moons it can hold. A supernova will clear one away.'); hand.makeAt = now; return; }
+  const m = { d: 0, a: 0, seed: newSeed() };
+  setMoon(m, q); m.heldAt = now; m.wx = q.x; m.wy = q.y; m.wr = globeR * 0.1;
+  p.moons.push(m); hand.moon = m; markDirty();
+  note(`${properName(m.seed)}, a moon of ${properName(p.seed)}`, 4);
+}
 function planetPinch(hand, now, dt) {
   const p = focusP, q = hand.pinchPt;
+  if (p && level === 3 && E3 >= 0.9 && !zoomLock && (hand.moon || Math.hypot(q.x, q.y) > globeR * 1.03)) { hand.pv = null; return moonPinch(hand, now); }
   if (!p || now - hand.pinchAt < 0.15 || !globePoint(q.x, q.y)) { hand.pv = null; return; }
   touched(now);
   if (!isSolid(p)) {
@@ -1374,14 +1467,47 @@ function planetClimate(hand, now, dt) {
   return true;
 }
 // a supernova over the planet arrives as a meteor: the harder the fist was held, the bigger the crater
+function skyImpact(p, pt) {
+  let best = null, bd = Infinity;
+  for (const m of p.moons) { const d = Math.hypot(m.wx - pt.x, m.wy - pt.y); if (d < m.wr + 0.9 && d < bd) { best = m; bd = d; } }
+  if (best) {
+    p.moons.splice(p.moons.indexOf(best), 1);
+    for (let i = 0; i < 180; i++) { const a = Math.random() * TAU, v = 0.5 + Math.random() * 3.5, c = 0.25 + Math.random() * 0.3; spawn(best.wx, best.wy, 0, Math.cos(a) * v, Math.sin(a) * v, rnd(0.3), c, c * 0.92, c * 0.82, 0.8 + Math.random() * 1.6, 0.04 + Math.random() * 0.05); }
+    note(`${properName(best.seed)}, a moon of ${properName(p.seed)}, destroyed`, 5);
+    smite(p, 0.12); markDirty();
+    return;
+  }
+  if (!p.rings) return;
+  const tilt = ((p.seed % 7) - 3) * 0.14, c = Math.cos(tilt), sn = Math.sin(tilt), outer = 1.35 + p.rings * 0.95;
+  const rr = Math.hypot(c * pt.x + sn * pt.y, (-sn * pt.x + c * pt.y) / 0.3) / globeR;
+  if (rr < 1.05 || rr > outer + 0.3) return;
+  for (let i = 0; i < 320; i++) { // the rings fly apart
+    const a = Math.random() * TAU, R = globeR * (1.24 + Math.random() * (outer - 1.24)), ex = Math.cos(a) * R, ey = Math.sin(a) * R * 0.3, v = 0.6 + Math.random() * 2.4, g = 0.3 + Math.random() * 0.3;
+    spawn(c * ex - sn * ey, sn * ex + c * ey, 0, Math.cos(a) * v, Math.sin(a) * v * 0.5 + rnd(0.6), 0, g, g * 0.95, g * 0.85, 0.8 + Math.random() * 1.4, 0.035 + Math.random() * 0.04);
+  }
+  p.rings = 0; markDirty();
+  note(`The rings of ${properName(p.seed)} are scattered`, 5);
+}
 function planetImpact(pt, power, now) {
   const p = focusP;
-  if (!p || !globePoint(pt.x, pt.y)) return;
+  if (!p || level !== 3 || E3 < 0.9 || zoomLock) return;
+  if (!globePoint(pt.x, pt.y)) return skyImpact(p, pt);
   if (isSolid(p)) { stampCrater(mapH, at.lon, at.lat, 0.07 + 0.2 * power, 0.14 + 0.3 * power); smite(p, 0.15 + 0.3 * power); }
   else { p.spots.push([at.lon, at.lat, 0.05 + 0.12 * power, 1]); if (p.spots.length > SPOT_MAX) p.spots.shift(); }
   touched(now);
 }
 // two fingertips: spread them to raise the sea (or whip up a giant's winds), close them to drain it
+function planetTips(mx, my, d, now) {
+  const p = focusP;
+  if (!p || E3 < 0.9 || zoomLock) return;
+  if (!sculpt) { // where the fingertips come together says which: on the planet, its sea; out beside it, its rings
+    if (Math.hypot(mx, my) <= globeR) sculpt = { tide: true, d };
+    else if (d < T.nebulaTouch) sculpt = { tide: true, ring: true, d };
+    else return;
+  }
+  if (sculpt.ring) { p.rings = Math.max(0.12, clamp01((d - 0.6) / 5)); markDirty(); return; }
+  planetTide(d, now);
+}
 function planetTide(d, now) {
   const p = focusP;
   if (!p || E3 < 0.9 || zoomLock) return;
@@ -1717,6 +1843,7 @@ function enterLand(lon, lat) {
   u.uVeg.value = veg; u.uCivL.value = L ? L.c * suit : 0; faithColor(L ? L.f : 0, u.uCivCol.value);
   land = { name: `${name}, ${zone}`, air, weather: damp > 0.6 ? 1 : 0, sunX: 0.42, sunY: 0.74, pan: 0, panV: 0, panAt: -10, flash: 0,
     lon, lat, k, dampBase, under, chosen: false, since: 0, tick: 0, told: -1 }; // where on the world this is, for the weather to work on
+  populateLand(p, lon, lat); lifeAmounts(L, suit);
   u.uSun.value.set(land.sunX, land.sunY); u.uCloud.value = WEATHER[land.weather][1]; u.uRain.value = u.uFog.value = u.uFlash.value = 0; u.uPan.value = 0;
   for (const hd of [hands.Left, hands.Right]) { hd.release(); hd.dwell = null; hd.rest = null; hd.charge = 0; }
   setLevel(4); warp(1);
@@ -1770,10 +1897,11 @@ function landWeather(dt, now) {
   u.uVeg.value += ((L ? clamp01(L.g * 1.5) * suit : 0) - u.uVeg.value) * e;
   u.uCivL.value += ((L ? L.c * suit : 0) - u.uCivL.value) * e;
   if (L) faithColor(L.f, u.uCivCol.value);
+  lifeAmounts(L, suit);
 }
 
 function updateLand(dt, now) {
-  if (E4 <= 0 || !land) { landMesh.visible = false; if (level < 4 && E4 <= 0) land = null; return; }
+  if (E4 <= 0 || !land) { landMesh.visible = lifeMesh.visible = false; if (level < 4 && E4 <= 0) land = null; return; }
   const u = landMat.uniforms, w = WEATHER[land.weather], k = Math.min(1, dt * 1.2);
   if (now - land.panAt > 0.1) land.panV *= Math.exp(-2.5 * dt);
   land.pan += land.panV * dt;
@@ -1783,8 +1911,344 @@ function updateLand(dt, now) {
   u.uSnowing.value = land.air < 0.08 ? 1 : 0;
   u.uSun.value.set(wrapTurn(land.sunX - land.pan), land.sunY); u.uPan.value = land.pan; u.uFlash.value = land.flash < 0.01 ? 0 : land.flash * (0.6 + 0.4 * Math.sin(now * 70));
   u.uTime.value = bodyTime; u.uAlpha.value = E4; u.uAspect.value = viewW / viewH;
-  landMesh.visible = true; landMesh.scale.set(viewW * LAND_M, viewH * LAND_M, 1);
+  landMesh.visible = lifeMesh.visible = true; landMesh.scale.set(viewW * LAND_M, viewH * LAND_M, 1); lifeMat.uniforms.uS.value = viewH * LAND_M;
   if (E4 >= 0.999) globe.visible = false; // nothing of the globe shows through any more
+}
+
+// ---------------------------------------------------------------- the living things you can see from the ground
+// Every world grows its own: its plants, its animals and its people are drawn once, from the planet's seed, as
+// a sheet of little cartoon pictures, and then stood about the hills wherever the land will have them.
+const ART_CELL = 128, ART_COLS = 8, ART_ROWS = 3, LIFE_MAX = 170;
+const artCanvas = document.createElement('canvas');
+artCanvas.width = ART_CELL * ART_COLS; artCanvas.height = ART_CELL * ART_ROWS;
+const artCtx = artCanvas.getContext('2d'), artTex = new THREE.CanvasTexture(artCanvas);
+let artSeed = null;
+const seeded = seed => () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const hsl = (h, s, l) => `hsl(${((h % 360) + 360) % 360},${Math.max(0, Math.min(100, s))}%,${Math.max(0, Math.min(100, l))}%)`;
+const INK = 'rgba(24,16,38,0.82)';
+
+// One picture is a stack of flat shapes. All of them are inked round first, then filled in order, so the
+// whole figure gets a single clean outline however many pieces it is built from.
+function sketch() {
+  const items = [];
+  const S = {
+    add(path, fill, ink = true) { items.push({ path, fill, ink }); return S; },
+    line(path, stroke, w = 2) { items.push({ path, stroke, w }); return S; },
+    circ(x, y, r, fill, ink) { const p = new Path2D(); p.arc(x, y, Math.max(0.5, r), 0, TAU); return S.add(p, fill, ink); },
+    ell(x, y, rx, ry, fill, ink, rot = 0) { const p = new Path2D(); p.ellipse(x, y, Math.max(0.5, rx), Math.max(0.5, ry), rot, 0, TAU); return S.add(p, fill, ink); },
+    poly(pts, fill, ink) { const p = new Path2D(); pts.forEach((q, i) => (i ? p.lineTo(q[0], q[1]) : p.moveTo(q[0], q[1]))); p.closePath(); return S.add(p, fill, ink); },
+    // a limb: a tapering band along a bent line
+    limb(x0, y0, x1, y1, bend, w0, w1, fill, ink) {
+      const mx = (x0 + x1) / 2 - (y1 - y0) * bend, my = (y0 + y1) / 2 + (x1 - x0) * bend, a = [], b = [];
+      for (let k = 0; k <= 8; k++) {
+        const t = k / 8, u = 1 - t, x = u * u * x0 + 2 * u * t * mx + t * t * x1, y = u * u * y0 + 2 * u * t * my + t * t * y1;
+        const dx = 2 * u * (mx - x0) + 2 * t * (x1 - mx), dy = 2 * u * (my - y0) + 2 * t * (y1 - my), l = Math.hypot(dx, dy) || 1, w = (w0 + (w1 - w0) * t) / 2;
+        a.push([x - dy / l * w, y + dx / l * w]); b.unshift([x + dy / l * w, y - dx / l * w]);
+      }
+      return S.poly(a.concat(b), fill, ink);
+    },
+    // a leaf: a pointed lens from one point to another
+    leaf(x0, y0, x1, y1, fat, fill, ink) {
+      const nx = -(y1 - y0) * fat, ny = (x1 - x0) * fat, mx = (x0 + x1) / 2, my = (y0 + y1) / 2, p = new Path2D();
+      p.moveTo(x0, y0); p.quadraticCurveTo(mx + nx, my + ny, x1, y1); p.quadraticCurveTo(mx - nx, my - ny, x0, y0); p.closePath();
+      return S.add(p, fill, ink);
+    },
+    dome(x, y, rx, ry, fill, ink) { const p = new Path2D(); p.ellipse(x, y, rx, ry, 0, Math.PI, 0); p.closePath(); return S.add(p, fill, ink); },
+    box(x, y, w, h, r, fill, ink) { const p = new Path2D(); p.moveTo(x + r, y); p.arcTo(x + w, y, x + w, y + h, r); p.arcTo(x + w, y + h, x, y + h, r); p.arcTo(x, y + h, x, y, r); p.arcTo(x, y, x + w, y, r); p.closePath(); return S.add(p, fill, ink); },
+    draw(ctx, col, row, scale = 1) {
+      ctx.save();
+      ctx.translate((col + 0.5) * ART_CELL, (row + 1) * ART_CELL - 10); ctx.scale(scale, scale);
+      ctx.lineJoin = ctx.lineCap = 'round'; ctx.strokeStyle = INK; ctx.lineWidth = 5 / scale;
+      for (const it of items) if (it.ink) ctx.stroke(it.path);
+      for (const it of items) {
+        if (it.stroke) { ctx.strokeStyle = it.stroke; ctx.lineWidth = it.w; ctx.stroke(it.path); }
+        else { ctx.fillStyle = it.fill; ctx.fill(it.path); }
+      }
+      ctx.restore();
+    },
+  };
+  return S;
+}
+
+// --- plants: eight kinds of growth, of which a world has three, in colours of its own
+const PLANTS = [
+  (S, r, c) => { // a round-headed tree
+    const h = 52 + r() * 34, tw = 4 + r() * 3.5;
+    S.limb(0, 0, (r() - 0.5) * 8, -h * 0.72, (r() - 0.5) * 0.2, tw * 2, tw, c.trunk);
+    const n = 3 + ((r() * 3) | 0), blobs = [];
+    for (let k = 0; k < n; k++) blobs.push([(r() - 0.5) * 34, -h * 0.72 - r() * 24, 15 + r() * 9]);
+    for (const b of blobs) S.circ(b[0], b[1], b[2], c.leaf);
+    for (const b of blobs) S.circ(b[0] + b[2] * 0.12, b[1] + b[2] * 0.3, b[2] * 0.72, c.leafLo, false);
+    for (const b of blobs) S.circ(b[0] - b[2] * 0.22, b[1] - b[2] * 0.25, b[2] * 0.62, c.leaf, false);
+    for (const b of blobs) S.circ(b[0] - b[2] * 0.3, b[1] - b[2] * 0.36, b[2] * 0.3, c.leafHi, false);
+    if (r() < 0.5) for (let k = 0; k < 5; k++) { const b = blobs[(r() * n) | 0]; S.circ(b[0] + (r() - 0.5) * b[2], b[1] + (r() - 0.3) * b[2] * 0.8, 2.6, c.accent, false); }
+  },
+  (S, r, c) => { // a tiered conifer
+    const n = 3 + ((r() * 2) | 0), w0 = 22 + r() * 10, step = 17 + r() * 6;
+    S.box(-3.5, -16, 7, 16, 2, c.trunk);
+    for (let k = 0; k < n; k++) { const y = -10 - k * step, w = w0 * (1 - k / (n + 0.6)); S.poly([[-w, y], [w, y], [0, y - step * 1.75]], c.leaf); }
+    for (let k = 0; k < n; k++) { const y = -10 - k * step, w = w0 * (1 - k / (n + 0.6)); S.poly([[0, y - 1], [w * 0.9, y - 1], [0, y - step * 1.6]], c.leafLo, false); S.poly([[-w * 0.55, y - 3], [-w * 0.15, y - 3], [-1, y - step * 1.2]], c.leafHi, false); }
+  },
+  (S, r, c) => { // a palm: a bent trunk and a spray of fronds
+    const h = 60 + r() * 28, lean = (r() - 0.5) * 30, n = 5 + ((r() * 3) | 0);
+    S.limb(0, 0, lean, -h, 0.12 * Math.sign(lean || 1), 9, 5, c.trunk);
+    for (let k = 0; k < n; k++) { const a = -Math.PI * (0.08 + 0.84 * k / (n - 1)), l = 26 + r() * 10; S.leaf(lean, -h, lean + Math.cos(a) * l, -h + Math.sin(a) * l * 0.75 + 9, 0.26, k % 2 ? c.leaf : c.leafLo); }
+    for (let k = 1; k < n; k += 2) { const a = -Math.PI * (0.08 + 0.84 * k / (n - 1)), l = 22; S.leaf(lean, -h, lean + Math.cos(a) * l, -h + Math.sin(a) * l * 0.75 + 7, 0.1, c.leafHi, false); }
+    S.circ(lean - 3, -h + 2, 3.4, c.accent, false).circ(lean + 4, -h + 3, 3, c.accent, false);
+  },
+  (S, r, c) => { // a great mushroom
+    const h = 36 + r() * 40, rw = 22 + r() * 16, rh = 14 + r() * 14;
+    S.limb(0, 0, (r() - 0.5) * 6, -h, (r() - 0.5) * 0.15, 13, 8, c.pale);
+    S.dome(0, -h + 3, rw, rh, c.accent);
+    S.ell(0, -h + 3, rw * 0.9, 3.2, c.leafLo, false);
+    for (let k = 0; k < 5; k++) { const a = Math.PI * (0.15 + 0.7 * r()), d = 0.35 + r() * 0.45; S.circ(-Math.cos(a) * rw * d, -h + 3 - Math.sin(a) * rh * d, 2 + r() * 3, c.pale, false); }
+  },
+  (S, r, c) => { // stalks with glowing lamps
+    const n = 2 + ((r() * 3) | 0);
+    for (let k = 0; k < n; k++) {
+      const x = (k - (n - 1) / 2) * 13 + (r() - 0.5) * 6, h = 34 + r() * 50, tx = x * 1.9 + (r() - 0.5) * 10;
+      S.limb(x * 0.4, 0, tx, -h, 0.18 * Math.sign(x || 1), 5, 2.6, c.leaf);
+      const R = 6 + r() * 5;
+      S.circ(tx, -h, R, c.accent).circ(tx - R * 0.25, -h - R * 0.25, R * 0.5, c.pale, false);
+    }
+    S.leaf(0, 0, -16, -12, 0.3, c.leafLo).leaf(0, 0, 15, -10, 0.3, c.leafLo);
+  },
+  (S, r, c) => { // a fat cactus
+    const h = 44 + r() * 34, w = 15 + r() * 6;
+    for (const sd of [-1, 1]) if (r() < 0.8) { const y = -h * (0.3 + r() * 0.3), l = 12 + r() * 8, ah = 14 + r() * 14; S.box(sd > 0 ? w / 2 - 3 : -w / 2 - l + 3, y - 4, l, 9, 4, c.leaf).box(sd > 0 ? w / 2 + l - 12 : -w / 2 - l + 3, y - ah, 9, ah + 4, 4.5, c.leaf); }
+    S.box(-w / 2, -h, w, h, w / 2, c.leaf).box(-w / 2 + 2.5, -h + 6, w * 0.3, h - 14, w * 0.15, c.leafHi, false).box(w / 2 - w * 0.32, -h + 8, w * 0.24, h - 14, w * 0.12, c.leafLo, false);
+    S.circ((r() - 0.5) * 6, -h - 2, 4.5, c.accent);
+  },
+  (S, r, c) => { // a fan of broad leaves
+    const n = 5 + ((r() * 3) | 0), l = 40 + r() * 30;
+    for (let k = 0; k < n; k++) { const a = -Math.PI / 2 + (k / (n - 1) - 0.5) * 2.1, ll = l * (1 - 0.35 * Math.abs(k / (n - 1) - 0.5) * 2); S.leaf(0, 0, Math.cos(a) * ll, Math.sin(a) * ll, 0.24, k % 2 ? c.leaf : c.leafLo); }
+    for (let k = 0; k < n; k++) { const a = -Math.PI / 2 + (k / (n - 1) - 0.5) * 2.1, ll = l * (1 - 0.35 * Math.abs(k / (n - 1) - 0.5) * 2) * 0.8; S.leaf(0, 0, Math.cos(a) * ll, Math.sin(a) * ll, 0.05, c.leafHi, false); }
+    if (r() < 0.6) { S.limb(0, 0, 2, -l * 1.05, 0.05, 3, 2, c.leafLo).circ(2, -l * 1.05, 6, c.accent).circ(0.5, -l * 1.05 - 1.5, 2.6, c.pale, false); }
+  },
+  (S, r, c) => { // a low bush, in berry
+    const n = 4 + ((r() * 3) | 0), blobs = [];
+    for (let k = 0; k < n; k++) blobs.push([(k - (n - 1) / 2) * 12 + (r() - 0.5) * 6, -9 - r() * 12, 11 + r() * 6]);
+    for (const b of blobs) S.circ(b[0], b[1], b[2], c.leaf);
+    for (const b of blobs) S.circ(b[0] + 1.5, b[1] + 3.5, b[2] * 0.75, c.leafLo, false);
+    for (const b of blobs) S.circ(b[0] - 2.5, b[1] - 3, b[2] * 0.55, c.leafHi, false);
+    for (let k = 0; k < 7; k++) { const b = blobs[(r() * n) | 0]; S.circ(b[0] + (r() - 0.5) * b[2] * 1.3, b[1] + (r() - 0.5) * b[2], 2.4, c.accent, false); }
+  },
+];
+
+function eyesOn(S, x, y, n, R, look) { // big cartoon eyes, looking the way it is going
+  const at = n === 1 ? [[0, 0, 1.25]] : n === 2 ? [[-0.95, 0, 1], [0.95, 0, 1]] : [[-1.25, 0.25, 0.8], [1.25, 0.25, 0.8], [0, -0.9, 0.9]];
+  for (const [ex, ey, k] of at) S.circ(x + ex * R, y + ey * R, R * k, '#fdfcf6');
+  for (const [ex, ey, k] of at) S.circ(x + ex * R + look * R * k * 0.3, y + ey * R + R * k * 0.08, R * k * 0.52, '#1c1626', false).circ(x + ex * R + look * R * k * 0.3 - R * k * 0.18, y + ey * R - R * k * 0.14, R * k * 0.2, '#ffffff', false);
+}
+// --- animals: a body on legs with a head, in a hundred proportions. Drawn walking to the right.
+function drawAnimal(S, r, sp) {
+  const { bl, bh, ll, neck, hr } = sp, by = -(ll + bh * 0.85), m = sp.legs / 2;
+  const legX = k => (m === 1 ? 0 : (k / (m - 1) - 0.5) * bl * 1.25);
+  for (let k = 0; k < m; k++) S.limb(legX(k) + 4, by + bh * 0.3, legX(k) + 6, -1, 0.06, 6, 4.5, sp.dark);
+  if (sp.top === 4) for (let k = 0; k < 5; k++) { const x = (k / 4 - 0.5) * bl * 1.4; S.poly([[x - 5, by - bh * 0.7], [x + 5, by - bh * 0.7], [x, by - bh - 9 - (2 - Math.abs(k - 2)) * 3]], sp.accent); }
+  if (sp.tail === 1) S.limb(-bl * 0.85, by, -bl - 16, by - 12 - r() * 8, -0.3, 5, 2, sp.main);
+  if (sp.tail === 2) { S.limb(-bl * 0.85, by, -bl - 12, by - 8, -0.2, 6, 4, sp.main); S.circ(-bl - 14, by - 10, 7.5, sp.accent); }
+  if (sp.tail === 3) S.poly([[-bl * 0.8, by - bh * 0.5], [-bl - 18, by + 2], [-bl * 0.8, by + bh * 0.5]], sp.main);
+  S.ell(0, by, bl, bh, sp.main);
+  const hx = bl * 0.62 + neck * 0.45, hy = by - bh * 0.35 - neck;
+  S.limb(bl * 0.5, by - bh * 0.1, hx, hy, -0.08, hr * 1.5, hr * 1.1, sp.main);
+  for (let k = 0; k < m; k++) { S.limb(legX(k) - 3, by + bh * 0.4, legX(k) - 1, -1, 0.06, 6.5, 5, sp.main); S.ell(legX(k) + 1, -1.5, 5, 3, sp.dark); }
+  if (sp.top === 1) S.leaf(hx - hr * 0.5, hy - hr * 0.6, hx - hr * 0.9, hy - hr * 1.9, 0.3, sp.main).leaf(hx + hr * 0.3, hy - hr * 0.7, hx + hr * 0.5, hy - hr * 2, 0.3, sp.main);
+  if (sp.top === 2) S.limb(hx - hr * 0.4, hy - hr * 0.7, hx - hr * 1.1, hy - hr * 2.1, 0.25, 4.5, 1.5, sp.pale).limb(hx + hr * 0.3, hy - hr * 0.7, hx + hr * 1, hy - hr * 2.1, -0.25, 4.5, 1.5, sp.pale);
+  if (sp.top === 3) { S.limb(hx - hr * 0.3, hy - hr * 0.7, hx - hr * 0.8, hy - hr * 2.2, 0.2, 2.4, 1.6, sp.dark).limb(hx + hr * 0.3, hy - hr * 0.7, hx + hr * 0.9, hy - hr * 2.2, -0.2, 2.4, 1.6, sp.dark); S.circ(hx - hr * 0.8, hy - hr * 2.2, 3.4, sp.accent).circ(hx + hr * 0.9, hy - hr * 2.2, 3.4, sp.accent); }
+  S.ell(hx, hy, hr * 1.12, hr, sp.main);
+  S.ell(0, by + bh * 0.32, bl * 0.72, bh * 0.52, sp.light, false);
+  if (sp.spots) for (let k = 0; k < 6; k++) S.circ((r() - 0.5) * bl * 1.3, by - bh * (0.15 + r() * 0.5), 2 + r() * 2.8, sp.dark, false);
+  else for (let k = 0; k < 3; k++) { const x = (k - 1) * bl * 0.45; S.leaf(x, by - bh * 0.93, x + 3, by - bh * 0.1, 0.22, sp.dark, false); }
+  eyesOn(S, hx + hr * 0.3, hy - hr * 0.12, sp.eyes, hr * (sp.eyes === 1 ? 0.5 : 0.36), 1);
+  const mouth = new Path2D(); mouth.arc(hx + hr * 0.55, hy + hr * 0.35, hr * 0.32, 0.25, 2.2); S.line(mouth, INK, 2);
+}
+// --- the people: upright, front on, and no two worlds' alike. Arms down, or raised to you.
+function drawAlien(S, r, sp, up, tall) {
+  const bw = sp.bw, bh = sp.bh * tall, lh = sp.skirt ? 0 : sp.lh, sy = -lh - bh + 6, hy = -lh - bh - sp.hh * 0.72;
+  if (!sp.skirt) for (const sd of [-1, 1]) { S.limb(sd * bw * 0.45, -lh - 3, sd * bw * 0.5, -1, 0, 6.5, 5.5, sp.skinLo); S.ell(sd * bw * 0.5 + sd * 1.5, -1.5, 5.5, 3, sp.skinLo); }
+  for (const sd of [-1, 1]) { // arms behind the body, hands in front of nothing
+    const hx = sd * (bw + (up ? 10 : 7)), hyy = up ? sy - sp.arm * 0.95 : sy + sp.arm * 0.85;
+    S.limb(sd * bw * 0.7, sy + 2, hx, hyy, sd * (up ? 0.22 : -0.12), 6, 4.5, sp.skin); S.circ(hx, hyy, 4.2, sp.skin);
+  }
+  if (sp.skirt) S.poly([[-bw * 0.75, sy - 4], [bw * 0.75, sy - 4], [bw * 1.25, 0], [-bw * 1.25, 0]], sp.robe);
+  else S.ell(0, -lh - bh / 2, bw, bh / 2 + 2, sp.robe);
+  S.box(-bw * 0.8, -lh - bh * 0.5, bw * 1.6, 5, 2, sp.accent, false);
+  S.circ(0, -lh - bh * 0.5 + 2.5, 3.6, sp.pale, false);
+  if (sp.ears) for (const sd of [-1, 1]) S.leaf(sd * sp.hw * 0.8, hy, sd * (sp.hw + 11), hy - 9, 0.3, sp.skin);
+  for (let k = 0; k < sp.ant; k++) { const sd = sp.ant === 1 ? 0 : k ? 1 : -1, ax = sd * sp.hw * 0.45, tx = sd * sp.hw * 0.9, ty = hy - sp.hh - 12; S.limb(ax, hy - sp.hh * 0.8, tx, ty, sd * 0.2, 2.6, 1.8, sp.skinLo); S.circ(tx, ty, 3.6, sp.accent); }
+  S.ell(0, hy, sp.hw, sp.hh, sp.skin);
+  S.ell(sp.hw * 0.1, hy + sp.hh * 0.42, sp.hw * 0.78, sp.hh * 0.45, sp.skinLo, false);
+  S.ell(-sp.hw * 0.3, hy - sp.hh * 0.45, sp.hw * 0.4, sp.hh * 0.22, sp.skinHi, false);
+  eyesOn(S, 0, hy - sp.hh * 0.05, sp.eyes, sp.hw * (sp.eyes === 1 ? 0.42 : 0.3), 0);
+  const mouth = new Path2D(); mouth.arc(0, hy + sp.hh * 0.4, sp.hw * 0.3, up ? 0.15 : 0.5, Math.PI - (up ? 0.15 : 0.5)); S.line(mouth, INK, 2.2);
+}
+// --- and what they build
+const HOMES = [
+  (S, r, c) => { S.dome(0, 0, 38, 34 + r() * 10, c.wall); S.dome(0, 0, 38, 9, c.roof, false); S.box(-8, -22, 16, 22, 8, c.dark); S.circ(-22, -17, 5, c.lamp).circ(22, -17, 5, c.lamp); S.circ(0, -40, 5, c.roof); },
+  (S, r, c) => { const h = 62 + r() * 18; S.box(-15, -h, 30, h, 4, c.wall); S.poly([[-23, -h + 3], [23, -h + 3], [0, -h - 30]], c.roof); S.box(-6, -18, 12, 18, 6, c.dark); S.circ(0, -h * 0.62, 5.5, c.lamp).box(-11, -h * 0.4, 22, 4, 2, c.roof, false); S.poly([[-6, -h - 2], [0, -h + 3], [-14, -h + 3]], c.pale, false); },
+  (S, r, c) => { const h = 34 + r() * 14; S.box(-17, -h, 34, h, 9, c.pale); S.dome(0, -h + 5, 42, 30, c.roof); for (let k = 0; k < 4; k++) S.circ((k - 1.5) * 17 + (r() - 0.5) * 5, -h - 6 - r() * 12, 3 + r() * 2.5, c.pale, false); S.box(-6.5, -19, 13, 19, 6.5, c.dark); S.circ(11, -h * 0.55, 4, c.lamp); },
+  (S, r, c) => { for (let k = 0; k < 3; k++) S.box(-17 + k * 3, -24 - k * 21, 34 - k * 6, 22, 7, k % 2 ? c.roof : c.wall); eyesOn(S, 0, -36, 2, 4.6, 0); S.limb(-13, -66, -24, -84, 0.3, 4, 2, c.wall).limb(13, -66, 24, -84, -0.3, 4, 2, c.wall); S.circ(0, -78, 9, c.lamp).circ(-2.5, -80.5, 3.6, '#fffbe6', false); },
+];
+
+function drawArt(p) {
+  if (artSeed === p.seed) return;
+  artSeed = p.seed;
+  const r = seeded((p.seed ^ 0x51ed270b) | 0), ctx = artCtx;
+  ctx.clearRect(0, 0, artCanvas.width, artCanvas.height);
+  // plants: a world's own greens (or blues, or reds), and a brighter second colour for fruit, caps and lamps
+  const hA = r() < 0.45 ? 80 + r() * 80 : r() * 360, hB = hA + 60 + r() * 220, sat = 42 + r() * 26, lum = 34 + r() * 12;
+  const kinds = []; while (kinds.length < 3) { const k = (r() * PLANTS.length) | 0; if (!kinds.includes(k)) kinds.push(k); }
+  for (let v = 0; v < ART_COLS; v++) {
+    const h = hA + (r() - 0.5) * 26, S = sketch();
+    PLANTS[kinds[v % 3]](S, r, { leaf: hsl(h, sat, lum), leafHi: hsl(h - 8, sat + 6, lum + 15), leafLo: hsl(h + 10, sat, lum - 11), accent: hsl(hB, 78, 62), pale: hsl(hB + 30, 30, 84),
+      trunk: hsl(hA + 180 + (r() - 0.5) * 60, 22 + r() * 14, 30 + r() * 12) });
+    S.draw(ctx, v, 0, 0.98);
+  }
+  // animals: two species, four of each
+  for (let s = 0; s < 2; s++) {
+    const h = r() * 360, legs = [2, 4, 4, 4, 6][(r() * 5) | 0], sp0 = { bl: 20 + r() * 20, bh: 12 + r() * 12, ll: 8 + r() * 26, neck: r() < 0.3 ? 16 + r() * 22 : r() * 8, hr: 9 + r() * 6,
+      legs, eyes: 1 + ((r() * 3) | 0), tail: (r() * 4) | 0, top: (r() * 5) | 0, spots: r() < 0.5 };
+    if (legs === 2) sp0.bl = Math.min(sp0.bl, 24);
+    for (let v = 0; v < 4; v++) {
+      const hh = h + (r() - 0.5) * 24, l = 52 + r() * 14, k = 0.82 + r() * 0.3, S = sketch();
+      drawAnimal(S, r, { ...sp0, bl: sp0.bl * k, bh: sp0.bh * k, ll: sp0.ll * k, hr: sp0.hr * (0.92 + 0.16 * r()), main: hsl(hh, 55, l), dark: hsl(hh + 14, 50, l - 22), light: hsl(hh - 14, 55, l + 22), accent: hsl(hh + 150, 72, 60), pale: hsl(hh + 40, 30, 86) });
+      const wide = sp0.bl * k * 2 + sp0.neck + 44, high = sp0.ll * k + sp0.bh * k * 2 + sp0.neck + sp0.hr * 3.4 + 6;
+      S.draw(ctx, s * 4 + v, 1, Math.min(1.4, 110 / wide, 110 / high));
+    }
+  }
+  // the people, and their houses
+  const h = r() * 360, hc = h + 100 + r() * 160;
+  const sp = { hw: 13 + r() * 9, hh: 11 + r() * 9, eyes: 1 + ((r() * 3) | 0), ant: (r() * 3) | 0, ears: r() < 0.4, bw: 10 + r() * 6, bh: 24 + r() * 12, lh: 8 + r() * 10, arm: 15 + r() * 8, skirt: r() < 0.35,
+    skin: hsl(h, 50, 60), skinLo: hsl(h + 12, 46, 46), skinHi: hsl(h - 10, 60, 76), robe: hsl(hc, 48, 46), accent: hsl(hc + 160, 80, 64), pale: hsl(hc + 40, 40, 88) };
+  for (let v = 0; v < 4; v++) { const S = sketch(), tall = v < 2 ? 1 : 0.72; drawAlien(S, r, sp, v % 2 === 1, tall); S.draw(ctx, v, 2, Math.min(1.5, 108 / (sp.lh + sp.bh * tall + sp.hh * 2 + sp.arm + 14), 108 / (sp.bw * 2 + 40))); }
+  const hc2 = { wall: hsl(hc + 20, 26, 70), roof: hsl(hc, 52, 46), dark: hsl(hc, 30, 18), lamp: '#ffd27a', pale: hsl(hc + 40, 30, 88) };
+  for (let v = 0; v < 4; v++) { const S = sketch(); HOMES[v](S, r, hc2); S.draw(ctx, 4 + v, 2, 1); }
+  artTex.needsUpdate = true;
+}
+
+const lifeGeo = new THREE.BufferGeometry();
+{
+  const corner = new Float32Array(LIFE_MAX * 12), idx = new Uint16Array(LIFE_MAX * 6);
+  for (let i = 0; i < LIFE_MAX; i++) {
+    corner.set([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], i * 12);
+    idx.set([i * 4, i * 4 + 1, i * 4 + 2, i * 4, i * 4 + 2, i * 4 + 3], i * 6);
+  }
+  lifeGeo.setAttribute('position', new THREE.BufferAttribute(corner, 3));
+  lifeGeo.setAttribute('a0', new THREE.BufferAttribute(new Float32Array(LIFE_MAX * 16), 4));
+  lifeGeo.setAttribute('a1', new THREE.BufferAttribute(new Float32Array(LIFE_MAX * 16), 4));
+  lifeGeo.setAttribute('a2', new THREE.BufferAttribute(new Float32Array(LIFE_MAX * 4), 1));
+  lifeGeo.setIndex(new THREE.BufferAttribute(idx, 1));
+  lifeGeo.setDrawRange(0, 0);
+}
+const LIFE_SHARED = /* glsl */`
+    uniform float uTime, uSeed, uAlpha, uRelief, uWater, uPan, uFog, uRain, uFlash;
+    uniform vec2 uSun;
+    uniform vec3 uAtm;
+    varying vec2 vUv, vP; varying float vI;
+    ${NOISE_GLSL}
+    const float H0 = ${LAND_H0}, TURN = ${LAND_TURN.toFixed(2)};
+    float wrapT(float x){ return x - TURN * floor(x / TURN + 0.5); }
+    float crags(vec2 p){ float v = 0.0, a = 0.55; for (int i = 0; i < 4; i++) { float n = 1.0 - abs(2.0 * noise(p) - 1.0); v += a * n * n; p = p * 2.1 + 13.0; a *= 0.5; } return v; }
+    float ridge(float x, float i, float fq){
+      float th = x * 6.2831853 / TURN, R = TURN * fq / 6.2831853;
+      vec2 q = vec2(cos(th), sin(th)) * R + vec2(i * 17.3 + uSeed, i * 7.31);
+      float a = fbm(q);
+      return mix(a, a * 0.3 + crags(q * 0.8 + 31.7) * 0.75, uRelief);
+    }
+    // the skyline of range i at bearing x, exactly as the landscape draws it
+    float skyline(float x, float i){
+      float f = i / 5.0, fq = mix(2.4, 1.0, f);
+      float amp = (uRelief * mix(0.42, 0.2, f) + 0.075 * (1.0 - smoothstep(0.85, 1.0, uWater))) * (1.0 - 0.45 * f * (1.0 - uRelief));
+      return H0 - f * f * 0.34 - 0.004 + amp * ridge(x, i, fq);
+    }`;
+const lifeMat = new THREE.ShaderMaterial({
+  uniforms: { uAtlas: { value: artTex }, uAmt: { value: new THREE.Vector3() }, uS: { value: 1 }, uWorship: { value: 0 },
+    ...Object.fromEntries(['uTime', 'uSeed', 'uAlpha', 'uRelief', 'uWater', 'uPan', 'uFog', 'uRain', 'uFlash', 'uSun', 'uAtm'].map(k => [k, landMat.uniforms[k]])) },
+  vertexShader: /* glsl */`
+    attribute vec4 a0, a1; attribute float a2;
+    uniform float uS, uWorship; uniform vec3 uAmt;
+    ${LIFE_SHARED}
+    void main(){
+      float kind = a2, B = a0.x, i = a0.y, ph = a1.z, size = a0.w, flip = 1.0, hop = 0.0, cell = a1.x;
+      float amt = kind < 0.5 ? uAmt.x : kind < 1.5 ? uAmt.y : uAmt.z;
+      if (kind > 0.5 && kind < 1.5) {                              // animals amble to and fro, and face the way they go
+        float t = uTime * 0.09 + ph, v = cos(t) * 0.4 + cos(t * 2.7 + 1.0) * 0.324;
+        B += sin(t) * 0.4 + sin(t * 2.7 + 1.0) * 0.12; flip = v < 0.0 ? -1.0 : 1.0;
+        hop = abs(sin(uTime * 5.0 + ph * 7.0)) * min(1.0, abs(v) * 4.0);
+      } else if (kind > 1.5 && kind < 2.5) {                       // people shuffle about, and raise their arms to a god they love
+        B += sin(uTime * 0.06 + ph) * 0.1; hop = abs(sin(uTime * 3.0 + ph * 5.0)) * 0.5;
+        if (uWorship > 0.5 && sin(uTime * 1.4 + ph * 3.0) > -0.2) cell += 1.0;
+      }
+      float y0 = skyline(B, i) - a0.z;
+      float yW = uWater > 0.0 ? H0 - 0.012 - (1.0 - smoothstep(0.3, 1.0, uWater)) * 0.2 : -1.0;
+      vec2 c = position.xy;
+      vUv = vec2((cell + (flip > 0.0 ? c.x : 1.0 - c.x)) / ${ART_COLS}.0, 1.0 - (a1.y + 1.0 - c.y) / ${ART_ROWS}.0);
+      vec2 q = vec2(wrapT(B - uPan) + (c.x - 0.5) * size, y0 - 0.085 * size + c.y * size + hop * 0.05 * size);
+      if (kind < 0.5) q.x += sin(uTime * 1.1 + ph) * 0.04 * size * c.y * c.y;   // plants sway from the root
+      vP = q; vI = i;
+      bool hide = a1.w > amt || (i < 4.5 && y0 < yW + 0.004) || (i > 4.5 && uWater >= 0.9);
+      gl_Position = hide ? vec4(2.0, 2.0, 2.0, 1.0) : projectionMatrix * modelViewMatrix * vec4(q.x * uS, (q.y - 0.5) * uS, 0.0, 1.0);
+    }`,
+  fragmentShader: /* glsl */`
+    uniform sampler2D uAtlas;
+    ${LIFE_SHARED}
+    void main(){
+      vec4 t = texture2D(uAtlas, vUv);
+      if (t.a < 0.03) discard;
+      for (int j = 1; j < 6; j++) {                                // anything nearer that rises in front hides it
+        float fj = float(j);
+        if (fj > vI + 0.5 && (j < 5 || uWater < 0.9) && skyline(vP.x + uPan, fj) > vP.y) discard;
+      }
+      float gSh = uSun.y - H0, gDay = smoothstep(-0.14, 0.08, gSh), gDusk = smoothstep(0.3, 0.0, gSh) * smoothstep(-0.22, -0.02, gSh);
+      vec3 gTint = mix(vec3(1.0, 0.42, 0.16), vec3(1.0, 0.95, 0.86), smoothstep(-0.02, 0.3, gSh));
+      vec3 gLight = gTint * (0.07 + 0.93 * gDay) * (1.0 - 0.45 * uRain) + vec3(0.03, 0.04, 0.09);
+      vec3 gHz = mix(uAtm, vec3(1.0), 0.45) * (0.03 + 0.97 * gDay) + vec3(1.0, 0.4, 0.12) * gDusk * 0.45 + vec3(0.008, 0.012, 0.03);
+      gHz = mix(gHz, vec3(0.6, 0.63, 0.68) * (0.06 + 0.94 * gDay), max(uFog, uRain * 0.5));
+      float f = vI / 5.0, hz = clamp((1.0 - f * 1.15) * 0.6 + uFog * 0.5 * (1.0 - f * 0.4), 0.0, 0.97);
+      vec3 lit = t.rgb * gLight * 1.3;
+      lit = mix(vec3(dot(lit, vec3(0.3, 0.59, 0.11))), lit, 1.25);          // keep the colours singing through the haze
+      vec3 col = mix(lit, gHz, hz * 0.45);
+      col += vec3(0.8, 0.85, 1.0) * 0.12 * uFlash;
+      col = mix(col, gHz, uFog * 0.3) * 0.8;
+      gl_FragColor = vec4(col * t.a * uAlpha, t.a * uAlpha);
+    }`,
+  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+  depthWrite: false, depthTest: false, transparent: true,
+});
+const lifeMesh = new THREE.Mesh(lifeGeo, lifeMat);
+lifeMesh.frustumCulled = false; lifeMesh.visible = false; lifeMesh.renderOrder = 2.85;
+scene.add(lifeMesh);
+
+// Stand them about this place. Where each one goes is fixed by the planet and the spot, so coming back finds
+// the same wood and the same village; how many of them show follows how the land is doing.
+function populateLand(p, lon, lat) {
+  drawArt(p);
+  const r = seeded(((p.seed | 0) ^ Math.imul((lon * 977) | 0, 7919) ^ Math.imul((lat * 1291) | 0, 104729)) | 0), list = [];
+  const scaleOf = i => { const f = i / 5; return (0.55 + 0.45 * f) / (2.4 - 1.4 * f); };
+  const put = (kind, B, i, d, size, col, row, rank) => list.push({ kind, B, i, d: d * scaleOf(i) + 0.002, size: size * scaleOf(i) * (1 + d * 3), col, row, ph: r() * 40, rank });
+  const groves = Array.from({ length: 9 }, () => r() * LAND_TURN);
+  for (let n = 0; n < 118; n++) { // woods in clumps, with strays between
+    const B = r() < 0.7 ? groves[(r() * groves.length) | 0] + (r() - 0.5) * 0.9 : r() * LAND_TURN, i = [2, 3, 3, 4, 4, 4, 5, 5][(r() * 8) | 0];
+    put(0, B, i, r() * (i === 5 ? 0.1 : 0.05), 0.13 + r() * 0.1, (r() * ART_COLS) | 0, 0, n < 12 ? 0.02 : r());
+  }
+  for (let n = 0; n < 20; n++) put(1, r() * LAND_TURN, [3, 4, 4, 5, 5][(r() * 5) | 0], 0.01 + r() * 0.07, 0.1 + r() * 0.035, (r() * ART_COLS) | 0, 1, n < 5 ? 0.05 : r());
+  const towns = [r() * LAND_TURN, r() * LAND_TURN, r() * LAND_TURN];
+  for (let n = 0; n < 9; n++) put(3, towns[n % 3] + (r() - 0.5) * 0.7, [3, 4, 4, 5][(r() * 4) | 0], 0.006 + r() * 0.03, 0.2 + r() * 0.07, 4 + ((r() * 4) | 0), 2, n < 3 ? 0.05 : r());
+  for (let n = 0; n < 18; n++) put(2, towns[n % 3] + (r() - 0.5) * 0.9, [4, 4, 5, 5][(r() * 4) | 0], 0.03 + r() * 0.07, 0.125 + r() * 0.02, ((r() * 2) | 0) * 2, 2, n < 5 ? 0.05 : r());
+  list.sort((a, b) => a.i - b.i || a.d - b.d); // far to near, so the near ones are drawn over the far
+  const a0 = lifeGeo.attributes.a0, a1 = lifeGeo.attributes.a1, a2 = lifeGeo.attributes.a2, n = Math.min(list.length, LIFE_MAX);
+  for (let k = 0; k < n; k++) for (let v = 0; v < 4; v++) {
+    const o = list[k], j = k * 4 + v;
+    a0.setXYZW(j, o.B, o.i, o.d, o.size); a1.setXYZW(j, o.col, o.row, o.ph, o.rank); a2.setX(j, o.kind);
+  }
+  a0.needsUpdate = a1.needsUpdate = a2.needsUpdate = true;
+  lifeGeo.setDrawRange(0, n * 6);
+}
+// how much of it there is to see: plants with the green of the world, animals and people where the ground suits them
+function lifeAmounts(L, suit) {
+  const u = lifeMat.uniforms, to = [L && L.s >= 2 ? clamp01(L.g * 1.5) * suit : 0, L && L.s >= 3 ? clamp01(suit * 1.3) : 0, L && L.s === 4 && suit > 0.12 ? clamp01(0.3 + L.c * 1.1) : 0];
+  u.uAmt.value.set(to[0], to[1], to[2]); u.uWorship.value = L && L.s === 4 && L.f > 0.2 ? 1 : 0;
 }
 
 ambient.renderOrder = 0; particles.renderOrder = 2;
@@ -1844,26 +2308,7 @@ function dropNebula(n) {
   if (nebula === n) nebula = null;
 }
 let nebula = null, nebulaLost = 0; // the one being pulled right now
-let sculpt = null;                 // ...or, inside a solar system, the planet being given rings or a moon
-
-// Inside a solar system the same gesture works on a planet: the first pull draws out rings, later ones add moons.
-function sculptPlanet(mx, my, d) {
-  if (!focusS || zoomLock) return;
-  if (!sculpt && d < T.nebulaTouch) {
-    let best = null, bd = Infinity;
-    for (const p of focusS.planets) {
-      const q = Math.hypot(p.wx - mx, p.wy - my);
-      if (q < p.reach + 0.4 && q < bd) { best = p; bd = q; }
-    }
-    if (!best) return;
-    sculpt = { p: best, moon: null };
-    if (best.rings && best.moons.length < MOON_MAX) { sculpt.moon = { d: 0, a: Math.random() * TAU, seed: newSeed() }; best.moons.push(sculpt.moon); }
-  }
-  if (sculpt) {
-    const pull = clamp01((d - 0.6) / 5);
-    if (sculpt.moon) sculpt.moon.d = pull; else sculpt.p.rings = Math.max(0.12, pull);
-  }
-}
+let sculpt = null;                 // ...or, at a planet, its sea being raised or its rings drawn out
 
 function updateNebulae(dt, L, R) {
   const both = L.active && R.active && L.gesture === 'point' && R.gesture === 'point';
@@ -1874,8 +2319,7 @@ function updateNebulae(dt, L, R) {
     const a = L.tips[1], b = R.tips[1], d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
     const W = space === 0 ? 1 : gK; // world units per unit of this space
     const local = () => (space === 0 ? _w.set(mx, my, 0) : unplace(mx, my, _w));
-    if (level === 3) planetTide(d, performance.now() / 1000);
-    else if (level === 2) sculptPlanet(mx, my, d);
+    if (level === 3) planetTips(mx, my, d, performance.now() / 1000);
     else if (!nebula && space >= 0 && d < T.nebulaTouch && !zoomLock) {
       local();
       nebula = addNebula(space, _w.x, _w.y, Math.atan2(b.y - a.y, b.x - a.x), T.nebulaMin / W, paletteIndex, (Math.random() * 3) | 0, Math.random() * 100);
@@ -2023,7 +2467,7 @@ class Hand {
 
   act(now, dt, sculpting) {
     const g = this.gesture, p = this.pos;
-    if (g !== 'pinch') { this.release(); this.pinchAt = null; this.spot = null; this.pv = null; } else if (this.pinchAt == null) this.pinchAt = now;
+    if (g !== 'pinch') { this.release(); this.pinchAt = null; this.makeAt = 0; this.moon = null; this.lockObj = null; this.lockK = 0; this.spot = null; this.pv = null; } else if (this.pinchAt == null) this.pinchAt = now;
     if (g === 'point') this.pointAt = now; else if (now - (this.pointAt ?? -10) > 0.4) this.dwell = null; // a finger that flickers out of view for a moment keeps its place
     // the gathered charge survives the split second it takes a fist to become an open hand, then drains
     if (g !== 'fist' && now - (this.fistAt ?? -10) > T.openWindow) this.charge = Math.max(0, this.charge - dt * 3);
@@ -2064,13 +2508,31 @@ class Hand {
         const q = this.pinchPt; // what a pinch makes or picks up depends on how far in we are
         // Picking something up is instant, but making something new waits for the pinch to be held a moment:
         // a hand closing into a fist passes through a pinch on the way, and that must not leave a stray behind.
-        const ready = now - this.pinchAt >= T.pinchHold, make = fn => () => (ready ? fn(q) : null);
+        // And it has to be held still: a pinch that wanders starts its count again from where it has got to.
+        if (!this.makeAt || Math.hypot(q.x - this.makeX, q.y - this.makeY) > T.pinchDrift) { this.makeAt = now; this.makeX = q.x; this.makeY = q.y; }
+        const k = (now - this.makeAt) / T.pinchHold, ready = k >= 1, make = fn => () => (ready ? fn(q) : null);
+        this.lockSeen = null;
         this.grab = level === 0 ? pinchPick(galaxies.filter(x => x.alive), q, this, now, make(acquireGalaxy))
           : level === 1 ? pinchPick(focusG.stars, q, this, now, make(newStar))
           : pinchPick(focusS.planets, q, this, now, make(newPlanet));
-        if (!this.grab && !this.assist && !ready) { // a glint at the fingertips while it waits
-          pickColor(0.6);
-          spawn(q.x + rnd(0.06), q.y + rnd(0.06), q.z, rnd(0.3), rnd(0.3), 0, cr, cg, cb, 0.25 + Math.random() * 0.25, 0.04);
+        const o = this.lockSeen;
+        if (o) { // resting on something: brackets of light turn and tighten round it until they lock
+          if (this.lockObj !== o || Math.hypot(q.x - this.lockX, q.y - this.lockY) > T.pinchDrift) { this.lockObj = o; this.lockAt = now; this.lockX = q.x; this.lockY = q.y; }
+          const lk = this.lockK = (now - this.lockAt) / T.lockHold, e = Math.min(1, lk), R = (o.kind === 'galaxy' ? o.radius * 0.8 : o.reach * 0.55) * (1.5 - 0.5 * e * e);
+          this.makeAt = 0;
+          pickColor(0.85);
+          for (let i = 0, n = Math.round(12 + R * 16); i < n; i++) {
+            const a = now * 1.6 * (1 - 0.7 * e) + (i % 4) * TAU / 4 + Math.random() * 0.75, b = 2 + 2 * e;
+            spawn(o.wx + Math.cos(a) * R, o.wy + Math.sin(a) * R, q.z, 0, 0, 0, cr * b, cg * b, cb * b, 0.18, 0.06 + 0.035 * e);
+          }
+        } else if (this.grab && this.lockObj === this.grab) { // locked: the ring closes in a flash, and it is yours
+          const g2 = this.grab, R = g2.kind === 'galaxy' ? g2.radius * 0.8 : g2.reach * 0.55;
+          pickColor(0.9);
+          for (let i = 0; i < 60; i++) { const a = i / 60 * TAU; spawn(g2.wx + Math.cos(a) * R, g2.wy + Math.sin(a) * R, q.z, -Math.cos(a) * 0.5, -Math.sin(a) * 0.5, 0, cr * 2.4, cg * 2.4, cb * 2.4, 0.35, 0.06); }
+          this.lockObj = null; this.lockK = 0;
+        } else { this.lockObj = null; this.lockK = 0; }
+        if (!o && !this.grab && !this.assist && !ready) { // light gathers to the fingertips while it waits: let go now and nothing comes of it
+          gatherLight(q, k, now);
         }
         this.grabInv = null; // remember how the hand and the galaxy were angled when the pinch began
         if (this.grab?.kind === 'galaxy' && this.hasQuat) { this.grabInv = this.quat.clone().invert(); this.grabQ.copy(this.grab.quat); }
@@ -2205,6 +2667,7 @@ function trackCamera(now, dt) {
     h.pos.multiplyScalar(0.2);
     TIP_IDS.forEach((id, k) => h.tips[k].copy(h.joints[id]));
     h.updateOrientation(fresh);
+    h.size = Math.max(Math.hypot(h.joints[9].x - h.joints[0].x, h.joints[9].y - h.joints[0].y), 1.25 * Math.hypot(h.joints[17].x - h.joints[5].x, h.joints[17].y - h.joints[5].y));
     h.pinchPt.lerpVectors(h.joints[4], h.joints[8], 0.5);
     h.setPose(now, dt, classify(lm, aspect, h.gesture), fresh);
   });
@@ -2234,19 +2697,19 @@ const LEGEND = { // one line per level: universe, galaxy, solar system, a world 
   'fist open': ['<b>Fist</b>gather, then <b class="in">open</b> for a supernova; on a galaxy it destroys it',
     '<b>Fist</b>gather, then <b class="in">open</b> on a star to blow it up',
     '<b>Fist</b>gather, then <b class="in">open</b> on a planet to smash it',
-    '<b>Fist</b>on the land sinks it; gathered out in space, then <b class="in">opened</b> over it, a meteor',
-    '<b>Fist</b>gather, then <b class="in">open</b> on the planet to scar its clouds',
+    '<b>Fist</b>on the land sinks it; gathered out in space, then <b class="in">opened</b> over it, a meteor; on a moon or the rings, destroys them',
+    '<b>Fist</b>gather, then <b class="in">open</b> on the planet to scar its clouds; on a moon or the rings, destroys them',
     '<b>Fist</b>gather, then <b class="in">open</b> for lightning'],
-  pinch: ['<b>Pinch</b>hold to grow a galaxy, twist to tilt, or grab one',
-    '<b>Pinch</b>hold to grow a star, or grab one',
-    '<b>Pinch</b>hold to grow a planet, or grab one to move its orbit',
-    '<b>Pinch</b>hold to swell the land, drag to draw a mountain range',
-    '<b>Pinch</b>hold on the planet to brew a storm',
+  pinch: ['<b>Pinch</b>hold still a second to gather light, then keep holding to grow a galaxy. Rest it on a galaxy to lock on, then drag or twist',
+    '<b>Pinch</b>hold still a second to gather light, then keep holding to grow a star. Rest it on a star to lock on, then drag',
+    '<b>Pinch</b>hold still a second to gather light, then keep holding to grow a planet. Rest it on a planet to lock on, then drag to move its orbit',
+    '<b>Pinch</b>on the land, hold to swell it or drag for mountains; beside the planet, hold still for a moon, or rest on a moon to move it',
+    '<b>Pinch</b>hold on the planet to brew a storm; beside it, hold still for a moon, or rest on a moon to move it',
     '<b>Pinch</b>take hold of the sun and move it: day, dusk, night'],
-  zoom: ['<b>Both hands open</b>sweep apart over a galaxy to dive in',
-    '<b>Both hands open</b>sweep apart over a star to visit; touch and rest them together to leave',
-    '<b>Both hands open</b>sweep apart over a planet to land; touch and rest them together to leave',
-    '<b>Open hand</b>holds or turns the planet for the other hand; touch and rest both together to leave',
+  zoom: ['<b>Open palm</b>push it at the screen over a galaxy to dive in',
+    '<b>Open palm</b>push it at the screen over a star to visit; touch and rest both hands together to leave',
+    '<b>Open palm</b>push it at the screen over a planet to go there; touch and rest both hands together to leave',
+    '<b>Open hand</b>holds or turns the planet; push it at a spot to go down there; touch and rest both together to leave',
     '<b>Open hand</b>holds or turns the planet; touch and rest both together to leave',
     '<b>Open hand</b>sweep sideways to turn and look around; touch and rest both together to leave'],
   point: ['<b>Point</b>draw with light', '<b>Point</b>draw with light', '<b>Point</b>draw with light',
@@ -2255,9 +2718,9 @@ const LEGEND = { // one line per level: universe, galaxy, solar system, a world 
     '<b>Two fingers</b>rest on a spot for a second to go down and stand there', '<b>Peace sign</b>change colors', '<b>Two fingers</b>nothing down here yet'],
   nebula: ['<b>Two fingertips</b>touch, then pull apart for a nebula',
     '<b>Two fingertips</b>touch, then pull apart for a dust cloud',
-    '<b>Two fingertips</b>touch on a planet, pull apart for rings, then moons',
-    '<b>Two fingertips</b>spread to raise the sea, close to drain it',
-    '<b>Two fingertips</b>spread for faster winds, close to calm them',
+    '<b>Two fingertips</b>rings and moons are made at the planet itself: go there first',
+    '<b>Two fingertips</b>on the planet, spread or close to raise or drain the sea; touch beside it and pull apart for rings',
+    '<b>Two fingertips</b>on the planet, spread or close for faster or calmer winds; touch beside it and pull apart for rings',
     '<b>Two fingertips</b>nothing down here yet'],
 };
 const ARRIVE = ['Back in the universe', 'Inside the galaxy. Pinch and hold to light a star.', 'A solar system. Pinch and hold to grow a planet.',
@@ -2667,10 +3130,10 @@ frame();
 // A handle for poking at things from the console. pose() stands in for the camera: call it every frame
 // with a hand's position and gesture and the rest of the game cannot tell the difference.
 window.__universe = { get pixelRatio() { return pixelRatio; }, hands, galaxies, nebulae, burst, setPalette, enter, surface, saveUniverse,
-  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, properName, titleOf, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, T, lifeOf, measureLife, get terrainOf() { return terrainOf; }, get globeR() { return globeR; }, globePoint, mapH,
+  get mode() { return mode; }, get level() { return level; }, get depth() { return depth; }, get focusG() { return focusG; }, get focusS() { return focusS; }, get focusP() { return focusP; }, properName, titleOf, get land() { return land; }, get E4() { return E4; }, enterLand, landMat, lifeMat, artCanvas, T, lifeOf, measureLife, get terrainOf() { return terrainOf; }, get globeR() { return globeR; }, globePoint, mapH,
   get at() { return at; },
-  pose(key, x, y, gesture, tipX = x, tipY = y) {
-    const h = hands[key], fresh = !h.active;
+  pose(key, x, y, gesture, tipX = x, tipY = y, size = 1) {
+    const h = hands[key], fresh = !h.active; h.size = size;
     h.prevPos.copy(h.pos); h.pos.set(x, y, 0); h.hasJoints = false; h.pinchPt.set(x, y, 0);
     for (const t of h.tips) t.set(tipX, tipY, 0);
     h.setPose(performance.now() / 1000, 1 / 60, gesture, fresh);
